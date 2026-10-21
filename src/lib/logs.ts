@@ -1,0 +1,148 @@
+import { db } from "./db";
+import { PERMISSIONS } from "./permissions";
+
+export type LogTone = "up" | "down" | "danger" | "warn" | "info" | "neutral";
+
+export const LOG_GROUPS: Record<string, { label: string; actions: string[] }> = {
+  grades: { label: "Grades", actions: ["recruit", "rank_up", "rank_down", "rank_demote", "grade_change"] },
+  warnings: { label: "Avertissements", actions: ["warn_add", "warn_remove"] },
+  follow: { label: "Commentaires & pastilles", actions: ["note_create", "badge_create", "badge_resolve"] },
+  access: { label: "Accès & rôles", actions: ["access_add", "access_remove", "access_permissions", "grade_role_add", "grade_role_remove", "warn_role_set"] },
+  sync: { label: "Synchro, IA & reset", actions: ["staff_sync", "review_generate", "counters_reset"] }
+};
+
+const ACTION_LABELS: Record<string, { label: string; tone: LogTone }> = {
+  recruit: { label: "Recrutement", tone: "up" },
+  counters_reset: { label: "Reset compteurs", tone: "danger" },
+  rank_up: { label: "Up", tone: "up" },
+  rank_down: { label: "Down", tone: "down" },
+  rank_demote: { label: "Demote", tone: "danger" },
+  grade_change: { label: "Grade modifié", tone: "info" },
+  warn_add: { label: "Avert ajouté", tone: "warn" },
+  warn_remove: { label: "Avert retiré", tone: "up" },
+  note_create: { label: "Commentaire", tone: "neutral" },
+  badge_create: { label: "Pastille", tone: "neutral" },
+  badge_resolve: { label: "Pastille résolue", tone: "neutral" },
+  access_add: { label: "Accès ajouté", tone: "info" },
+  access_remove: { label: "Accès retiré", tone: "danger" },
+  access_permissions: { label: "Permissions", tone: "info" },
+  grade_role_add: { label: "Rôle de grade +", tone: "info" },
+  grade_role_remove: { label: "Rôle de grade −", tone: "info" },
+  warn_role_set: { label: "Rôle d'avert", tone: "info" },
+  staff_sync: { label: "Synchro Discord", tone: "neutral" },
+  review_generate: { label: "Bilan IA", tone: "info" }
+};
+
+export function actionMeta(action: string): { label: string; tone: LogTone; failed: boolean } {
+  const failed = action.endsWith("_failed");
+  const base = failed ? action.slice(0, -"_failed".length) : action;
+  const meta = ACTION_LABELS[base] ?? { label: base, tone: "neutral" as LogTone };
+  return failed ? { label: `Échec · ${meta.label}`, tone: "danger", failed } : { ...meta, failed };
+}
+
+const permissionLabel = (key: string) => PERMISSIONS.find((p) => p.key === key)?.label ?? key;
+
+function describe(action: string, d: Record<string, unknown>): string {
+  const reason = d.reason ? ` — « ${String(d.reason)} »` : "";
+  switch (action.replace(/_failed$/, "")) {
+    case "rank_up":
+    case "rank_down":
+    case "rank_demote":
+    case "grade_change":
+      if (action.endsWith("_failed")) return d.discordStatus === 403 ? "Discord a refusé (rôle du bot trop bas)" : `Discord a refusé (code ${d.discordStatus})`;
+      return `${d.from ?? "?"} → ${d.to ?? "?"}${reason}`;
+    case "warn_add":
+    case "warn_remove":
+      if (action.endsWith("_failed")) return d.discordStatus === 403 ? "Discord a refusé (rôle du bot trop bas)" : `Discord a refusé (code ${d.discordStatus})`;
+      return `Avert ${d.level ?? "?"}${reason}`;
+    case "note_create":
+      return d.body ? `« ${String(d.body).slice(0, 200)} »` : "";
+    case "badge_create":
+      return `${d.color ?? ""}${reason}`;
+    case "access_add":
+    case "access_remove":
+      return `${d.type === "role" ? "Rôle" : "Personne"} ${d.label ?? d.discordId ?? ""}`;
+    case "access_permissions":
+      return `${d.label ?? d.discordId ?? ""} : ${Array.isArray(d.permissions) && d.permissions.length ? (d.permissions as string[]).map(permissionLabel).join(", ") : "aucune"}`;
+    case "recruit":
+      if (action.endsWith("_failed")) return d.discordStatus === 403 ? "Discord a refusé (rôle du bot trop bas)" : `Discord a refusé (code ${d.discordStatus})`;
+      return `Nouveau staff : ${d.to ?? "?"}${reason}`;
+    case "counters_reset":
+      return "Temps vocal et temps de jeu remis à zéro (historique conservé)";
+    case "review_generate":
+      return `Semaine du ${d.week ?? "?"} : ${d.generated ?? 0} résumé(s), ${d.skipped ?? 0} déjà fait(s), ${d.failed ?? 0} échec(s)`;
+    case "staff_sync":
+      return `${d.total ?? 0} membres · +${d.inserted ?? 0} / ~${d.updated ?? 0} / −${d.markedLeft ?? 0}`;
+    default:
+      return Object.keys(d).length ? JSON.stringify(d) : "";
+  }
+}
+
+export type LogRow = {
+  id: number;
+  createdAt: string;
+  actorId: string;
+  actorName: string;
+  action: string;
+  label: string;
+  tone: LogTone;
+  targetId: string | null;
+  targetName: string | null;
+  details: string;
+};
+
+export function listLogs(opts: { group?: string; q?: string; limit?: number; offset?: number }): { rows: LogRow[]; total: number } {
+  const where: string[] = [];
+  const params: Record<string, unknown> = {};
+  const group = opts.group ? LOG_GROUPS[opts.group] : undefined;
+  if (opts.group === "failed") where.push("a.action LIKE '%\\_failed' ESCAPE '\\'");
+  else if (group) {
+    const names = group.actions.flatMap((n) => [n, `${n}_failed`]);
+    where.push(`a.action IN (${names.map((_, i) => `@g${i}`).join(",")})`);
+    names.forEach((n, i) => (params[`g${i}`] = n));
+  }
+  if (opts.q?.trim()) {
+    where.push(
+      `(LOWER(COALESCE(a.actor_name, sa.username, '')) LIKE @q OR LOWER(COALESCE(st.username, '')) LIKE @q
+        OR a.actor_discord_id LIKE @q OR a.target_discord_id LIKE @q)`
+    );
+    params.q = `%${opts.q.trim().toLowerCase()}%`;
+  }
+  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const from = `FROM audit_log a
+    LEFT JOIN staff_members sa ON sa.discord_id = a.actor_discord_id
+    LEFT JOIN staff_members st ON st.discord_id = a.target_discord_id ${clause}`;
+
+  const total = (db.prepare(`SELECT COUNT(*) AS n ${from}`).get(params) as { n: number }).n;
+  const rows = db
+    .prepare(
+      `SELECT a.id, a.created_at, a.actor_discord_id, a.action, a.target_discord_id, a.details,
+              COALESCE(a.actor_name, sa.username, a.actor_discord_id) AS actor_name, st.username AS target_name
+       ${from} ORDER BY a.id DESC LIMIT @limit OFFSET @offset`
+    )
+    .all({ ...params, limit: opts.limit ?? 50, offset: opts.offset ?? 0 }) as {
+    id: number; created_at: string; actor_discord_id: string; action: string; target_discord_id: string | null;
+    details: string; actor_name: string; target_name: string | null;
+  }[];
+
+  return {
+    total,
+    rows: rows.map((r) => {
+      let details: Record<string, unknown> = {};
+      try { details = JSON.parse(r.details) as Record<string, unknown>; } catch { /* keep empty */ }
+      const meta = actionMeta(r.action);
+      return {
+        id: r.id,
+        createdAt: r.created_at,
+        actorId: r.actor_discord_id,
+        actorName: r.actor_name,
+        action: r.action,
+        label: meta.label,
+        tone: meta.tone,
+        targetId: r.target_discord_id,
+        targetName: r.target_name,
+        details: describe(r.action, details)
+      };
+    })
+  };
+}
