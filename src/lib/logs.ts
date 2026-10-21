@@ -91,7 +91,7 @@ export type LogRow = {
   details: string;
 };
 
-export function listLogs(opts: { group?: string; q?: string; limit?: number; offset?: number }): { rows: LogRow[]; total: number } {
+export async function listLogs(opts: { group?: string; q?: string; limit?: number; offset?: number }): Promise<{ rows: LogRow[]; total: number }> {
   const where: string[] = [];
   const params: Record<string, unknown> = {};
   const group = opts.group ? LOG_GROUPS[opts.group] : undefined;
@@ -113,17 +113,19 @@ export function listLogs(opts: { group?: string; q?: string; limit?: number; off
     LEFT JOIN staff_members sa ON sa.discord_id = a.actor_discord_id
     LEFT JOIN staff_members st ON st.discord_id = a.target_discord_id ${clause}`;
 
-  const total = (db.prepare(`SELECT COUNT(*) AS n ${from}`).get(params) as { n: number }).n;
-  const rows = db
-    .prepare(
+  const [countRow, rows] = await Promise.all([
+    db.get<{ n: number }>(`SELECT COUNT(*) AS n ${from}`, params as never),
+    db.all<{
+      id: number; created_at: string; actor_discord_id: string; action: string; target_discord_id: string | null;
+      details: string; actor_name: string; target_name: string | null;
+    }>(
       `SELECT a.id, a.created_at, a.actor_discord_id, a.action, a.target_discord_id, a.details,
               COALESCE(a.actor_name, sa.username, a.actor_discord_id) AS actor_name, st.username AS target_name
-       ${from} ORDER BY a.id DESC LIMIT @limit OFFSET @offset`
+       ${from} ORDER BY a.id DESC LIMIT @limit OFFSET @offset`,
+      { ...params, limit: opts.limit ?? 50, offset: opts.offset ?? 0 } as never
     )
-    .all({ ...params, limit: opts.limit ?? 50, offset: opts.offset ?? 0 }) as {
-    id: number; created_at: string; actor_discord_id: string; action: string; target_discord_id: string | null;
-    details: string; actor_name: string; target_name: string | null;
-  }[];
+  ]);
+  const total = countRow?.n ?? 0;
 
   return {
     total,

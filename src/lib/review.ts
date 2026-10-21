@@ -1,5 +1,6 @@
-import { db } from "./db";
+import { db, stmt } from "./db";
 import { audit } from "./audit";
+import { releaseLock, tryAcquireLock } from "./bot-status";
 import { isRating, RATINGS, type Rating } from "./ratings";
 import { toSqlUtc, weekKey, weekRange } from "./week";
 
@@ -72,78 +73,106 @@ async function askAI(username: string, comments: { author: string; body: string 
 export type Review = { rating: Rating; summary: string };
 
 /** Reviews of one week, keyed by Discord id. */
-export function getReviews(key: string): Map<string, Review> {
-  const rows = db.prepare("SELECT discord_id, rating, summary FROM weekly_reviews WHERE week_start = ?").all(key) as {
-    discord_id: string; rating: string; summary: string;
-  }[];
+export async function getReviews(key: string): Promise<Map<string, Review>> {
+  const rows = await db.all<{ discord_id: string; rating: string; summary: string }>(
+    "SELECT discord_id, rating, summary FROM weekly_reviews WHERE week_start = ?",
+    [key]
+  );
   return new Map(rows.filter((r) => isRating(r.rating)).map((r) => [r.discord_id, { rating: r.rating as Rating, summary: r.summary }]));
 }
 
-export type ReviewRun = { ok: true; generated: number; skipped: number; failed: number; errors: string[] } | { ok: false; error: "ai_not_configured" };
+export type ReviewRun =
+  | { ok: true; generated: number; skipped: number; failed: number; remaining: number; errors: string[] }
+  | { ok: false; error: "ai_not_configured" | "already_running" };
+
+const LOCK = "review";
+const LOCK_TTL_MS = 6 * 60_000;
 
 /**
  * Generate the reviews of a week for every active member who received at least one comment.
  * Members already reviewed are skipped unless `force`. Each success also replaces the member's
  * previous AI badge with the new pastille.
+ *
+ * Work is done in bounded batches (`maxMembers` AI calls per run, default 25) so that a run fits in a
+ * serverless time limit; `remaining` says how many members are still waiting for the next run.
+ * A database lock prevents two server instances from running it at the same time.
  */
 export async function generateWeeklyReviews(
   offset = 0,
-  opts: { force?: boolean; delayMs?: number; actor?: { discordId: string; username?: string } } = {}
+  opts: { force?: boolean; delayMs?: number; maxMembers?: number; actor?: { discordId: string; username?: string } } = {}
 ): Promise<ReviewRun> {
   if (!aiConfigured()) return { ok: false, error: "ai_not_configured" };
-  const range = weekRange(offset);
-  const key = weekKey(range);
-  const from = toSqlUtc(range.start);
-  const to = toSqlUtc(range.end);
+  if (!(await tryAcquireLock(LOCK, LOCK_TTL_MS))) return { ok: false, error: "already_running" };
 
-  const members = db
-    .prepare(
-      `SELECT DISTINCT s.discord_id, s.username FROM staff_notes n
-       JOIN staff_members s ON s.discord_id = n.discord_id AND s.left_guild_at IS NULL
-       WHERE n.created_at >= ? AND n.created_at <= ?`
-    )
-    .all(from, to) as { discord_id: string; username: string }[];
-  const done = getReviews(key);
-  const commentsOf = db.prepare(
-    `SELECT n.body, COALESCE(n.author_name, sa.username, n.author_discord_id) AS author
-     FROM staff_notes n LEFT JOIN staff_members sa ON sa.discord_id = n.author_discord_id
-     WHERE n.discord_id = ? AND n.created_at >= ? AND n.created_at <= ? ORDER BY n.id`
-  );
+  try {
+    const range = weekRange(offset);
+    const key = weekKey(range);
+    const from = toSqlUtc(range.start);
+    const to = toSqlUtc(range.end);
 
-  let generated = 0;
-  let skipped = 0;
-  let failed = 0;
-  const errors: string[] = [];
+    const [members, comments, done] = await Promise.all([
+      db.all<{ discord_id: string; username: string }>(
+        `SELECT s.discord_id, s.username FROM staff_members s
+         WHERE s.left_guild_at IS NULL AND EXISTS (
+           SELECT 1 FROM staff_notes n WHERE n.discord_id = s.discord_id AND n.created_at >= ? AND n.created_at <= ?)
+         ORDER BY s.grade_level DESC, s.username`,
+        [from, to]
+      ),
+      db.all<{ discord_id: string; body: string; author: string }>(
+        `SELECT n.discord_id, n.body, COALESCE(n.author_name, sa.username, n.author_discord_id) AS author
+         FROM staff_notes n LEFT JOIN staff_members sa ON sa.discord_id = n.author_discord_id
+         WHERE n.created_at >= ? AND n.created_at <= ? ORDER BY n.id`,
+        [from, to]
+      ),
+      getReviews(key)
+    ]);
+    const commentsOf = new Map<string, { body: string; author: string }[]>();
+    for (const c of comments) commentsOf.set(c.discord_id, [...(commentsOf.get(c.discord_id) ?? []), c]);
 
-  for (const member of members) {
-    if (done.has(member.discord_id) && !opts.force) {
-      skipped++;
-      continue;
+    const budget = opts.maxMembers ?? 25;
+    let generated = 0;
+    let skipped = 0;
+    let failed = 0;
+    let remaining = 0;
+    const errors: string[] = [];
+
+    for (const member of members) {
+      if (done.has(member.discord_id) && !opts.force) {
+        skipped++;
+        continue;
+      }
+      if (generated + failed >= budget) {
+        remaining++;
+        continue;
+      }
+      const list = commentsOf.get(member.discord_id) ?? [];
+      try {
+        const review = parseReview(await askAI(member.username, list));
+        if (!review) throw new Error("réponse IA illisible");
+        await db.batch([
+          stmt(
+            `INSERT INTO weekly_reviews (week_start, discord_id, rating, summary, comments_count) VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT(week_start, discord_id) DO UPDATE SET rating = excluded.rating, summary = excluded.summary,
+               comments_count = excluded.comments_count, created_at = CURRENT_TIMESTAMP`,
+            [key, member.discord_id, review.rating, review.summary, list.length]
+          ),
+          // One AI pastille at a time: the new week replaces the previous one.
+          stmt("UPDATE staff_badges SET status = 'resolved', resolved_at = CURRENT_TIMESTAMP WHERE discord_id = ? AND status = 'active' AND author_discord_id = 'ia'", [member.discord_id]),
+          stmt("INSERT INTO staff_badges (discord_id, color, reason, author_discord_id) VALUES (?, ?, ?, 'ia')", [
+            member.discord_id, review.rating, `Bilan IA · ${RATINGS[review.rating].label} : ${review.summary}`
+          ])
+        ]);
+        generated++;
+      } catch (error) {
+        failed++;
+        errors.push(`${member.username}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      if (opts.delayMs !== 0) await sleep(opts.delayMs ?? 2200);
     }
-    const comments = commentsOf.all(member.discord_id, from, to) as { body: string; author: string }[];
-    try {
-      const review = parseReview(await askAI(member.username, comments));
-      if (!review) throw new Error("réponse IA illisible");
-      db.transaction(() => {
-        db.prepare(
-          `INSERT INTO weekly_reviews (week_start, discord_id, rating, summary, comments_count) VALUES (?, ?, ?, ?, ?)
-           ON CONFLICT(week_start, discord_id) DO UPDATE SET rating = excluded.rating, summary = excluded.summary,
-             comments_count = excluded.comments_count, created_at = CURRENT_TIMESTAMP`
-        ).run(key, member.discord_id, review.rating, review.summary, comments.length);
-        // One AI pastille at a time: the new week replaces the previous one.
-        db.prepare("UPDATE staff_badges SET status = 'resolved', resolved_at = CURRENT_TIMESTAMP WHERE discord_id = ? AND status = 'active' AND author_discord_id = 'ia'")
-          .run(member.discord_id);
-        db.prepare("INSERT INTO staff_badges (discord_id, color, reason, author_discord_id) VALUES (?, ?, ?, 'ia')")
-          .run(member.discord_id, review.rating, `Bilan IA · ${RATINGS[review.rating].label} : ${review.summary}`);
-      })();
-      generated++;
-    } catch (error) {
-      failed++;
-      errors.push(`${member.username}: ${error instanceof Error ? error.message : String(error)}`);
-    }
-    if (opts.delayMs !== 0) await sleep(opts.delayMs ?? 2200);
+
+    await audit(opts.actor ?? "ia", "review_generate", null, { week: key, generated, skipped, failed, remaining });
+    return { ok: true, generated, skipped, failed, remaining, errors };
+  } finally {
+    await releaseLock(LOCK);
   }
-
-  audit(opts.actor ?? "ia", "review_generate", null, { week: key, generated, skipped, failed });
-  return { ok: true, generated, skipped, failed, errors };
 }

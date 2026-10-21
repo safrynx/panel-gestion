@@ -1,6 +1,6 @@
-import { db } from "./db";
 import { timingSafeEqual } from "node:crypto";
 import { z } from "zod";
+import { db, stmt } from "./db";
 
 /**
  * FiveM agent session ingestion.
@@ -45,78 +45,60 @@ export type IngestResult =
  * A session_start creates a row in activity_sessions (source='fivem') with 0 seconds;
  * the matching session_end computes real elapsed seconds. Replays are ignored.
  */
-export function ingestFivemEvent(event: FivemEvent): IngestResult {
+export async function ingestFivemEvent(event: FivemEvent): Promise<IngestResult> {
   // The member must exist in staff_members to be counted.
-  const member = db.prepare("SELECT id FROM staff_members WHERE discord_id = ? AND left_guild_at IS NULL").get(event.discordId);
+  const member = await db.get("SELECT id FROM staff_members WHERE discord_id = ? AND left_guild_at IS NULL", [event.discordId]);
   if (!member) return { ok: true, action: "ignored" };
 
   const startedAt = new Date(event.timestamp * 1000).toISOString();
 
   if (event.event === "session_start") {
-    const existing = db
-      .prepare("SELECT id FROM activity_sessions WHERE external_session_id = ?")
-      .get(event.sessionId);
-    if (existing) return { ok: true, action: "ignored" }; // idempotent replay
-    db.prepare(
-      `INSERT INTO activity_sessions (discord_id, source, started_at, ended_at, seconds, external_session_id, origin)
-       VALUES (?, 'fivem', ?, NULL, 0, ?, 'fivem_agent')`
-    ).run(event.discordId, startedAt, event.sessionId);
-    return { ok: true, action: "opened" };
+    // UNIQUE(external_session_id): a replay inserts nothing.
+    const { changes } = await db.run(
+      `INSERT OR IGNORE INTO activity_sessions (discord_id, source, started_at, ended_at, seconds, external_session_id, origin)
+       VALUES (?, 'fivem', ?, NULL, 0, ?, 'fivem_agent')`,
+      [event.discordId, startedAt, event.sessionId]
+    );
+    return { ok: true, action: changes > 0 ? "opened" : "ignored" };
   }
 
-  // session_end: find the matching open session.
-  const open = db
-    .prepare(
-      "SELECT id, started_at FROM activity_sessions WHERE external_session_id = ? AND source = 'fivem' AND ended_at IS NULL"
-    )
-    .get(event.sessionId) as { id: number; started_at: string } | undefined;
-
-  if (!open) {
-    // Replay of an already-closed session, or an end without a start.
-    return { ok: true, action: "ignored" };
-  }
+  // session_end: find the matching open session (none = replay of a closed session, or an end without a start).
+  const open = await db.get<{ id: number; started_at: string }>(
+    "SELECT id, started_at FROM activity_sessions WHERE external_session_id = ? AND source = 'fivem' AND ended_at IS NULL",
+    [event.sessionId]
+  );
+  if (!open) return { ok: true, action: "ignored" };
 
   const end = new Date(event.timestamp * 1000).getTime();
-  const start = new Date(open.started_at).getTime();
-  const seconds = Math.max(0, Math.floor((end - start) / 1000));
-  db.prepare("UPDATE activity_sessions SET ended_at = ?, seconds = ? WHERE id = ?").run(
-    new Date(end).toISOString(),
-    seconds,
-    open.id
-  );
+  const seconds = Math.max(0, Math.floor((end - new Date(open.started_at).getTime()) / 1000));
+  await db.run("UPDATE activity_sessions SET ended_at = ?, seconds = ? WHERE id = ?", [new Date(end).toISOString(), seconds, open.id]);
   return { ok: true, action: "closed" };
 }
 
 /**
- * Close any FiveM sessions still open after a configurable stale timeout.
- * Called on bot/web startup or by a scheduled job, protects against missed
- * playerDropped events (server crash, etc.).
+ * Close any FiveM sessions still open after a stale timeout.
+ * Called by the periodic maintenance, protects against missed playerDropped events (server crash, etc.).
  */
-export function closeStaleFivemSessions(maxSeconds: number): number {
-  const rows = db
-    .prepare(
-      `SELECT id, started_at FROM activity_sessions
-       WHERE source = 'fivem' AND ended_at IS NULL
-         AND started_at <= datetime('now', ?)`
+export async function closeStaleFivemSessions(maxSeconds: number): Promise<number> {
+  const cutoff = new Date(Date.now() - Math.floor(maxSeconds) * 1000).toISOString();
+  const rows = await db.all<{ id: number; started_at: string }>(
+    "SELECT id, started_at FROM activity_sessions WHERE source = 'fivem' AND ended_at IS NULL AND started_at <= ?",
+    [cutoff]
+  );
+  const seconds = Math.floor(maxSeconds);
+  await db.batch(
+    rows.map((row) =>
+      stmt("UPDATE activity_sessions SET ended_at = ?, seconds = ? WHERE id = ?", [
+        new Date(new Date(row.started_at).getTime() + seconds * 1000).toISOString(),
+        seconds,
+        row.id
+      ])
     )
-    .all(`-${Math.floor(maxSeconds)} seconds`) as { id: number; started_at: string }[];
-  let closed = 0;
-  for (const row of rows) {
-    const start = new Date(row.started_at).getTime();
-    const seconds = Math.floor(maxSeconds);
-    db.prepare("UPDATE activity_sessions SET ended_at = ?, seconds = ? WHERE id = ?").run(
-      new Date(start + seconds * 1000).toISOString(),
-      seconds,
-      row.id
-    );
-    closed++;
-  }
-  return closed;
+  );
+  return rows.length;
 }
 
 /** True if the member currently has an open FiveM session. */
-export function isInFivemNow(discordId: string): boolean {
-  return Boolean(
-    db.prepare("SELECT 1 FROM activity_sessions WHERE discord_id = ? AND source = 'fivem' AND ended_at IS NULL").get(discordId)
-  );
+export async function isInFivemNow(discordId: string): Promise<boolean> {
+  return Boolean(await db.get("SELECT 1 AS x FROM activity_sessions WHERE discord_id = ? AND source = 'fivem' AND ended_at IS NULL", [discordId]));
 }

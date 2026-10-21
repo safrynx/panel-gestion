@@ -16,13 +16,13 @@ export async function GET(req: NextRequest) {
   const id = params.get("id");
   if (id) {
     if (!/^\d{17,20}$/.test(id)) return NextResponse.json({ error: "validation" }, { status: 400 });
-    const detail = getMemberDetail(id, since);
+    const detail = await getMemberDetail(id, since);
     if (!detail.member) return NextResponse.json({ error: "unknown_member" }, { status: 404 });
     return NextResponse.json(detail);
   }
 
   const search = params.get("q")?.trim().toLowerCase() ?? "";
-  let staff = listStaffWithStats(since);
+  let staff = await listStaffWithStats(since);
   if (search) {
     staff = staff.filter((m) => m.username.toLowerCase().includes(search) || m.discordId.includes(search));
   }

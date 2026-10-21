@@ -27,7 +27,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "validation", issues: parsed.error.issues.map((i) => i.path.join(".")) }, { status: 400 });
   }
 
-  const result = ingestFivemEvent(parsed.data as FivemEvent);
+  const result = await ingestFivemEvent(parsed.data as FivemEvent);
   if (!result.ok) {
     return NextResponse.json({ error: result.reason }, { status: 400 });
   }

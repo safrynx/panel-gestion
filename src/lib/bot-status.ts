@@ -1,28 +1,35 @@
 import { db } from "./db";
 
-const HEARTBEAT_MAX_AGE_MS = 90_000;
+/** The bot reports every 60 s; three missed beats and it is considered offline. */
+const HEARTBEAT_MAX_AGE_MS = 180_000;
 
-export function setBotStatus(key: string, value: string): void {
-  db.prepare(
+export async function setBotStatus(key: string, value: string): Promise<void> {
+  await db.run(
     `INSERT INTO bot_status (key, value, updated_at) VALUES (?, ?, ?)
-     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
-  ).run(key, value, new Date().toISOString());
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+    [key, value, new Date().toISOString()]
+  );
 }
 
-export function clearBotHeartbeat(): void {
-  db.prepare("DELETE FROM bot_status WHERE key = 'heartbeat'").run();
+export async function clearBotHeartbeat(): Promise<void> {
+  await db.run("DELETE FROM bot_status WHERE key = 'heartbeat'");
+}
+
+export async function getStatusValue(key: string): Promise<string | null> {
+  const row = await db.get<{ value: string }>("SELECT value FROM bot_status WHERE key = ?", [key]);
+  return row?.value ?? null;
 }
 
 export type BotStatus = {
-  /** True when the bot sent a heartbeat in the last 90 seconds. */
+  /** True when the bot sent a heartbeat recently. */
   alive: boolean;
   heartbeatAt: string | null;
   /** Position of the bot's highest role: it can only manage roles below this position. */
   topRolePosition: number | null;
 };
 
-export function getBotStatus(): BotStatus {
-  const rows = db.prepare("SELECT key, value FROM bot_status").all() as { key: string; value: string }[];
+export async function getBotStatus(): Promise<BotStatus> {
+  const rows = await db.all<{ key: string; value: string }>("SELECT key, value FROM bot_status WHERE key IN ('heartbeat', 'top_role_position')");
   const map = new Map(rows.map((r) => [r.key, r.value]));
   const heartbeatAt = map.get("heartbeat") ?? null;
   const top = map.get("top_role_position");
@@ -33,7 +40,21 @@ export function getBotStatus(): BotStatus {
   };
 }
 
-export function getStatusValue(key: string): string | null {
-  const row = db.prepare("SELECT value FROM bot_status WHERE key = ?").get(key) as { value: string } | undefined;
-  return row?.value ?? null;
+/**
+ * Take a named lock that expires by itself (serverless instances share no memory, so the database is
+ * the only place to coordinate). Returns true when the lock was obtained.
+ */
+export async function tryAcquireLock(name: string, ttlMs: number): Promise<boolean> {
+  const now = new Date();
+  const expired = new Date(now.getTime() - ttlMs).toISOString();
+  const { changes } = await db.run(
+    `INSERT INTO bot_status (key, value, updated_at) VALUES (@key, @now, @now)
+     ON CONFLICT(key) DO UPDATE SET value = @now, updated_at = @now WHERE bot_status.value < @expired`,
+    { key: `lock:${name}`, now: now.toISOString(), expired }
+  );
+  return changes > 0;
+}
+
+export async function releaseLock(name: string): Promise<void> {
+  await db.run("DELETE FROM bot_status WHERE key = ?", [`lock:${name}`]);
 }

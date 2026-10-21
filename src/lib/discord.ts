@@ -133,7 +133,7 @@ export async function refreshGuildRoles(): Promise<number | null> {
   const res = await fetch(`${DISCORD_API}/guilds/${guildId}/roles`, { headers: { Authorization: `Bot ${token}` } });
   if (!res.ok) return null;
   const roles = (await res.json()) as { id: string; name: string; position: number; color: number }[];
-  storeGuildRoles(roles.filter((r) => r.id !== guildId)); // @everyone has the guild id
+  await storeGuildRoles(roles.filter((r) => r.id !== guildId)); // @everyone has the guild id
   return roles.length;
 }
 

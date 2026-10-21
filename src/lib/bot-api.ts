@@ -1,12 +1,14 @@
 import { z } from "zod";
 import { clearBotHeartbeat, setBotStatus } from "./bot-status";
+import { storePlaytimeTotals } from "./playtime";
 import { storeGuildRoles } from "./roles";
 import { syncStaffMembers, upsertStaffMember } from "./sync";
 import { closeAllVoiceSessions, closeVoiceSession, moveVoiceSession, openVoiceSession, reconcileVoiceSessions } from "./voice";
 
 /**
  * Operations the Discord bot (a separate project, hosted elsewhere) asks the site to perform.
- * The bot never touches the database: it reports what it sees on Discord, the site stores it.
+ * The bot never touches the database: it reports what it sees on Discord (and in the game database),
+ * the site stores it.
  */
 
 const snowflake = z.string().regex(/^\d{17,20}$/);
@@ -40,9 +42,15 @@ export const voiceEventSchema = z.object({
 
 export const heartbeatSchema = z.object({ topRolePosition: z.number().int().nullable().optional() });
 
+/** Lifetime playtime per Discord id, read by the bot from the game server's database. */
+export const playtimeSchema = z.object({
+  totals: z.array(z.object({ discordId: snowflake, seconds: z.number().int().min(0).max(10_000_000_000) })).max(100_000)
+});
+
 type Sync = z.infer<typeof syncSchema>;
 type Member = z.infer<typeof memberSchema>;
 type VoiceEvent = z.infer<typeof voiceEventSchema>;
+type Playtime = z.infer<typeof playtimeSchema>;
 
 const toSynced = (m: Member) => ({
   discordId: m.discordId,
@@ -53,36 +61,40 @@ const toSynced = (m: Member) => ({
   presentInGuild: m.present
 });
 
-export function recordHeartbeat(topRolePosition?: number | null): void {
-  setBotStatus("heartbeat", new Date().toISOString()); // site clock: the bot's clock does not matter
-  if (typeof topRolePosition === "number") setBotStatus("top_role_position", String(topRolePosition));
+export async function recordHeartbeat(topRolePosition?: number | null): Promise<void> {
+  await setBotStatus("heartbeat", new Date().toISOString()); // site clock: the bot's clock does not matter
+  if (typeof topRolePosition === "number") await setBotStatus("top_role_position", String(topRolePosition));
 }
 
 /** Full snapshot: guild roles, all members, and who is in voice right now. */
-export function applySync(data: Sync) {
-  storeGuildRoles(data.roles.filter((r) => r.name !== "@everyone"));
-  const members = syncStaffMembers(data.members.map(toSynced), "bot");
-  const voice = reconcileVoiceSessions(data.voice, new Date());
-  recordHeartbeat(data.topRolePosition);
+export async function applySync(data: Sync) {
+  await storeGuildRoles(data.roles.filter((r) => r.name !== "@everyone"));
+  const members = await syncStaffMembers(data.members.map(toSynced), "bot");
+  const voice = await reconcileVoiceSessions(data.voice, new Date());
+  await recordHeartbeat(data.topRolePosition);
   return { members, voice };
 }
 
-export function applyMember(data: Member) {
-  return { result: upsertStaffMember(toSynced(data)) };
+export async function applyMember(data: Member) {
+  return { result: await upsertStaffMember(toSynced(data)) };
 }
 
-export function applyVoice(data: VoiceEvent) {
+export async function applyVoice(data: VoiceEvent) {
   const at = data.at ? new Date(data.at) : new Date();
-  if (data.action === "leave") closeVoiceSession(data.discordId, at);
+  if (data.action === "leave") await closeVoiceSession(data.discordId, at);
   else if (!data.channelId) throw new Error("channelId required");
-  else if (data.action === "join") openVoiceSession(data.discordId, data.roleIds, data.channelId, at);
-  else moveVoiceSession(data.discordId, data.roleIds, data.channelId, at);
+  else if (data.action === "join") await openVoiceSession(data.discordId, data.roleIds, data.channelId, at);
+  else await moveVoiceSession(data.discordId, data.roleIds, data.channelId, at);
   return { ok: true };
 }
 
+export async function applyPlaytime(data: Playtime) {
+  return storePlaytimeTotals(data.totals);
+}
+
 /** The bot is going down cleanly: close every open voice session and drop the heartbeat. */
-export function applyShutdown() {
-  const closed = closeAllVoiceSessions(new Date());
-  clearBotHeartbeat();
+export async function applyShutdown() {
+  const closed = await closeAllVoiceSessions(new Date());
+  await clearBotHeartbeat();
   return { closed };
 }

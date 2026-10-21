@@ -16,11 +16,10 @@ export async function getSessionUser(): Promise<SessionUser | null> {
   const store = await cookies();
   const payload = decodeSession(store.get(sessionCookieName)?.value);
   if (!payload) return null;
-  const row = db
-    .prepare("SELECT grade, grade_level, roles_json, left_guild_at, last_synced_at FROM staff_members WHERE discord_id = ?")
-    .get(payload.discordId) as
-    | { grade: string; grade_level: number; roles_json: string; left_guild_at: string | null; last_synced_at: string | null }
-    | undefined;
+  const row = await db.get<{ grade: string; grade_level: number; roles_json: string; left_guild_at: string | null; last_synced_at: string | null }>(
+    "SELECT grade, grade_level, roles_json, left_guild_at, last_synced_at FROM staff_members WHERE discord_id = ?",
+    [payload.discordId]
+  );
 
   let roles = payload.roles;
   if (row?.left_guild_at) roles = [];
@@ -37,14 +36,14 @@ export async function getSessionUser(): Promise<SessionUser | null> {
     username: payload.username,
     avatarUrl: payload.avatarUrl,
     roles,
-    permissions: getPermissions(payload.discordId, roles),
+    permissions: await getPermissions(payload.discordId, roles),
     grade: row?.grade ?? "Membre",
     gradeLevel: row?.grade_level ?? 0
   };
 }
 
 /** True when the user may open the panel (owner, listed user, or holder of a listed role). */
-export function isStaffUser(user: SessionUser): boolean {
+export async function isStaffUser(user: SessionUser): Promise<boolean> {
   return hasPanelAccess(user.discordId, user.roles);
 }
 
@@ -52,16 +51,16 @@ export function isOwner(user: SessionUser): boolean {
   return isOwnerId(user.discordId);
 }
 
-/** Management level resolved from GRADE_ROLE_MAPPING_JSON (0 = no managed grade). */
-export function getActorLevel(user: SessionUser): number {
-  return resolveGradeFromRoles(user.roles)?.gradeLevel ?? 0;
+/** Management level in the grade ladder (0 = no managed grade). */
+export async function getActorLevel(user: SessionUser): Promise<number> {
+  return (await resolveGradeFromRoles(user.roles))?.gradeLevel ?? 0;
 }
 
 /** API guard: returns the staff user or a ready-made 401/403 response. */
 export async function requireStaffApi(): Promise<{ user: SessionUser } | { error: NextResponse }> {
   const user = await getSessionUser();
   if (!user) return { error: NextResponse.json({ error: "unauthenticated" }, { status: 401 }) };
-  if (!isStaffUser(user)) return { error: NextResponse.json({ error: "forbidden" }, { status: 403 }) };
+  if (!(await isStaffUser(user))) return { error: NextResponse.json({ error: "forbidden" }, { status: 403 }) };
   return { user };
 }
 
@@ -104,6 +103,6 @@ export async function requireOwnerPage(): Promise<SessionUser> {
 export async function requireStaffPage(): Promise<SessionUser> {
   const user = await getSessionUser();
   if (!user) redirect("/login");
-  if (!isStaffUser(user)) redirect("/login?error=forbidden");
+  if (!(await isStaffUser(user))) redirect("/login?error=forbidden");
   return user;
 }

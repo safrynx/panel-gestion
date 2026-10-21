@@ -18,16 +18,15 @@ export default async function MemberPage({ params }: { params: Promise<{ discord
   const user = await requireStaffPage();
   const { discordId } = await params;
   if (!/^\d{17,20}$/.test(discordId)) notFound();
-  const since = countersSince();
-  const detail = getMemberDetail(discordId, since);
+  const since = await countersSince();
+  const detail = await getMemberDetail(discordId, since);
   if (!detail.member) notFound();
   const { badges, notes, warnings, gradeHistory } = detail;
   const [member] = await withFivemPlaytime([detail.member], since);
 
   const owner = isOwner(user);
-  const actorLevel = getActorLevel(user);
+  const [actorLevel, ladder, warnRoles] = await Promise.all([getActorLevel(user), getGradeLadder(), getWarnRoles()]);
   const canAct = discordId !== user.discordId && (owner || member.gradeLevel < actorLevel);
-  const ladder = getGradeLadder();
   const assignable = canAct && can(user, "set_grade") ? ladder.filter((g) => owner || g.level < actorLevel).map((g) => g.name) : [];
   const canUp = canAct && can(user, "rank_up") && ladder.some((g) => g.level > member.gradeLevel && (owner || g.level < actorLevel));
   const canDown = canAct && can(user, "rank_down") && ladder.some((g) => g.level < member.gradeLevel);
@@ -92,7 +91,7 @@ export default async function MemberPage({ params }: { params: Promise<{ discord
 
           <section className="rise rise-2">
             <header style={{ paddingBottom: 12, borderBottom: "1px solid var(--line-2)" }}><h2 className="h2">Avertissements</h2></header>
-            {getWarnRoles().length === 0 && <div className="banner" style={{ marginTop: 14 }}>Rôles « Avert 1/2/3 » non détectés : les avertissements sont gardés dans le panel, sans rôle Discord.</div>}
+            {warnRoles.length === 0 && <div className="banner" style={{ marginTop: 14 }}>Rôles « Avert 1/2/3 » non détectés : les avertissements sont gardés dans le panel, sans rôle Discord.</div>}
             <ul style={{ listStyle: "none", margin: "6px 0 0", padding: 0 }}>
               {warnings.length === 0 && <li className="muted" style={{ padding: "16px 0" }}>Aucun avertissement.</li>}
               {warnings.map((w) => (

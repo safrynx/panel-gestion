@@ -1,40 +1,33 @@
 import { closeStaleFivemSessions } from "./fivem";
-import { getFivemPlaytimes } from "./fivem-db";
 import { getStatusValue, setBotStatus } from "./bot-status";
 import { aiConfigured, generateWeeklyReviews } from "./review";
-import { weekKey, weekRange } from "./week";
+import { isSundayFrom, weekKey, weekRange } from "./week";
 
 const FIVEM_STALE_SECONDS = 12 * 3600;
+/** AI calls per run: keeps one run well inside a serverless time limit; the next tick continues. */
+const REVIEWS_PER_RUN = 15;
 
-let reviewRunning = false;
+/** Sunday evening (community time zone), once per week: is the AI summary of the week still to be done? */
+export async function reviewDue(now = new Date()): Promise<boolean> {
+  if (!aiConfigured() || !isSundayFrom(Number(process.env.REVIEW_HOUR ?? 20), now)) return false;
+  return (await getStatusValue("review_done")) !== weekKey(weekRange(0, now));
+}
 
 /**
- * Sunday evening: have the AI summarise the week's comments, once per week (failed members are retried
- * on the next tick). Runs in the background: it can take minutes on a free AI tier.
+ * Generate (part of) the week's AI summaries. Safe to call repeatedly: a database lock prevents overlapping runs,
+ * members already reviewed are skipped, and the week is marked done only when nobody is left and nothing failed.
  */
-export function maybeStartSundayReview(now = new Date()): boolean {
-  const hour = Number(process.env.REVIEW_HOUR ?? 20);
-  if (reviewRunning || now.getDay() !== 0 || now.getHours() < hour || !aiConfigured()) return false;
-  const key = weekKey(weekRange(0, now));
-  if (getStatusValue("review_done") === key) return false;
-
-  reviewRunning = true;
-  void generateWeeklyReviews(0)
-    .then((result) => {
-      if (!result.ok) return;
-      console.log(`[review] week ${key}: generated=${result.generated} skipped=${result.skipped} failed=${result.failed}`);
-      if (result.failed === 0) setBotStatus("review_done", key);
-      else console.error("[review] errors:", result.errors.join(" | "));
-    })
-    .catch((error) => console.error("[review] failed:", error instanceof Error ? error.message : error))
-    .finally(() => { reviewRunning = false; });
-  return true;
+export async function runReviewBatch(): Promise<void> {
+  const key = weekKey(weekRange(0));
+  const result = await generateWeeklyReviews(0, { maxMembers: REVIEWS_PER_RUN });
+  if (!result.ok) return;
+  console.log(`[review] week ${key}: generated=${result.generated} skipped=${result.skipped} failed=${result.failed} remaining=${result.remaining}`);
+  if (result.failed === 0 && result.remaining === 0) await setBotStatus("review_done", key);
+  else if (result.errors.length) console.error("[review] errors:", result.errors.join(" | "));
 }
 
 /** Periodic housekeeping, triggered by the bot's tick (or any cron hitting POST /api/bot/tick). */
 export async function runMaintenance() {
-  const staleFivemClosed = closeStaleFivemSessions(FIVEM_STALE_SECONDS);
-  const totals = await getFivemPlaytimes(); // also records playtime snapshots
-  const reviewStarted = maybeStartSundayReview();
-  return { staleFivemClosed, fivemPlayersRead: totals?.size ?? null, reviewStarted };
+  const staleFivemClosed = await closeStaleFivemSessions(FIVEM_STALE_SECONDS);
+  return { staleFivemClosed, reviewDue: await reviewDue() };
 }

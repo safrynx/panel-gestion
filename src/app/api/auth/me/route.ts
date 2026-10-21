@@ -8,8 +8,8 @@ export async function GET() {
   if (!user) return NextResponse.json({ authenticated: false });
   return NextResponse.json({
     authenticated: true,
-    staff: isStaffUser(user),
-    managerLevel: getActorLevel(user),
+    staff: await isStaffUser(user),
+    managerLevel: await getActorLevel(user),
     user: { ...user, roles: undefined }
   });
 }

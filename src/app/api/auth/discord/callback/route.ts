@@ -3,7 +3,6 @@ import { avatarUrl, exchangeCode, fetchDiscordUser, fetchGuildMember, getDiscord
 import { hasPanelAccess } from "@/lib/config";
 import { encodeSession, sessionCookieName, SESSION_MAX_AGE, verifyAndConsumeState } from "@/lib/session";
 import { upsertStaffMember } from "@/lib/sync";
-import { db } from "@/lib/db";
 
 export const runtime = "nodejs";
 
@@ -25,7 +24,7 @@ export async function GET(req: NextRequest) {
   if (url.searchParams.get("error")) return fail("access_denied");
 
   // CSRF: state must exist, be single-use, and not be expired.
-  if (!code || !verifyAndConsumeState(db, state)) return fail("invalid_state");
+  if (!code || !(await verifyAndConsumeState(state))) return fail("invalid_state");
 
   const token = await exchangeCode(code);
   if (!token?.access_token) return fail("oauth_exchange");
@@ -36,12 +35,12 @@ export async function GET(req: NextRequest) {
   const member = await fetchGuildMember(token.access_token, config.guildId);
   if (!member) return fail("not_in_guild");
 
-  if (!hasPanelAccess(user.id, member.roles)) return fail("forbidden");
+  if (!(await hasPanelAccess(user.id, member.roles))) return fail("forbidden");
 
   const username = user.global_name || user.username;
   const avatar = avatarUrl(user);
   // Make sure the member exists in the DB right away with fresh roles/grade.
-  upsertStaffMember({
+  await upsertStaffMember({
     discordId: user.id,
     username,
     avatarUrl: avatar,

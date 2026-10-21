@@ -11,7 +11,7 @@ export default async function LogsPage({ searchParams }: { searchParams: Promise
   const user = await requirePermissionPage("view_logs");
   const { g = "", q = "", page: pageParam } = await searchParams;
   const page = Math.max(1, Number.parseInt(pageParam ?? "1", 10) || 1);
-  const { rows, total } = listLogs({ group: g, q, limit: PAGE_SIZE, offset: (page - 1) * PAGE_SIZE });
+  const { rows, total } = await listLogs({ group: g, q, limit: PAGE_SIZE, offset: (page - 1) * PAGE_SIZE });
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const link = (p: number) => `/logs?${new URLSearchParams({ ...(g ? { g } : {}), ...(q ? { q } : {}), page: String(p) })}`;
 

@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { buildAuthorizeUrl, getDiscordConfig } from "@/lib/discord";
 import { generateState, storeState } from "@/lib/session";
-import { db } from "@/lib/db";
 
 export const runtime = "nodejs";
 
@@ -13,6 +12,6 @@ export async function GET() {
     );
   }
   const state = generateState();
-  storeState(db, state);
+  await storeState(state);
   return NextResponse.redirect(buildAuthorizeUrl(state));
 }

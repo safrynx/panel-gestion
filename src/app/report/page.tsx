@@ -18,7 +18,7 @@ export default async function ReportPage({ searchParams }: { searchParams: Promi
   const user = await requirePermissionPage("view_report");
   const { week: weekParam } = await searchParams;
   const week = Math.min(52, Math.max(0, Number.parseInt(weekParam ?? "0", 10) || 0));
-  const report = await buildWeeklyReport(week);
+  const [report, source] = await Promise.all([buildWeeklyReport(week), fivemSource()]);
 
   return (
     <Shell user={user} active="report">
@@ -27,7 +27,7 @@ export default async function ReportPage({ searchParams }: { searchParams: Promi
         title="Bilan hebdo"
         actions={<>{can(user, "run_review") && <ReviewButton week={week} />}<CopyButton text={reportToText(report)} label="Copier pour Discord" /><a href={`/api/report?week=${week}&format=csv`} className="btn primary">Télécharger CSV</a></>}
       >
-        Staff classés par grade · temps de jeu issu de {fivemSource() === "database" ? "la base du serveur FiveM" : "l'agent FiveM"}.
+        Staff classés par grade · temps de jeu issu de {source === "database" ? "la base du serveur FiveM" : "l'agent FiveM"}.
       </PageHead>
 
       {can(user, "run_review") && !aiConfigured() && <div className="banner"><b>Bilan IA non configuré.</b> Ajoute une clé gratuite (Groq ou Gemini) dans <code>AI_API_KEY</code> du .env, voir .env.example. Sans clé, aucune appréciation n&apos;est générée.</div>}

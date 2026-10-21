@@ -1,5 +1,5 @@
 import { createHmac, timingSafeEqual, randomBytes } from "node:crypto";
-import type { Database } from "better-sqlite3";
+import { db } from "./db";
 
 const SESSION_TTL_SECONDS = 60 * 60 * 8; // 8 hours
 
@@ -73,18 +73,15 @@ export const SESSION_MAX_AGE = SESSION_TTL_SECONDS;
 
 /**
  * Persist OAuth state so the callback can verify it (defense against CSRF).
- * Stored in SQLite keyed by the state value, single-use.
+ * Stored in the database keyed by the state value, single-use, valid 15 minutes.
  */
-export function storeState(db: Database, state: string): void {
-  db.prepare("INSERT INTO oauth_states (state) VALUES (?)").run(state);
-  // Prune entries older than 15 minutes
-  db.prepare("DELETE FROM oauth_states WHERE created_at < datetime('now', '-15 minutes')").run();
+export async function storeState(state: string): Promise<void> {
+  await db.run("INSERT INTO oauth_states (state) VALUES (?)", [state]);
+  await db.run("DELETE FROM oauth_states WHERE created_at < datetime('now', '-15 minutes')"); // prune
 }
 
-export function verifyAndConsumeState(db: Database, state: string | null): boolean {
+export async function verifyAndConsumeState(state: string | null): Promise<boolean> {
   if (!state) return false;
-  const result = db
-    .prepare("DELETE FROM oauth_states WHERE state = ? AND created_at >= datetime('now', '-15 minutes')")
-    .run(state);
-  return result.changes === 1;
+  const { changes } = await db.run("DELETE FROM oauth_states WHERE state = ? AND created_at >= datetime('now', '-15 minutes')", [state]);
+  return changes === 1;
 }

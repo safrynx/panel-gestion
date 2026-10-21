@@ -16,7 +16,7 @@ const messages: Record<string, string> = {
 export default async function LoginPage({ searchParams }: { searchParams: Promise<{ error?: string; missing?: string }> }) {
   const user = await getSessionUser();
   const { error, missing } = await searchParams;
-  if (user && isStaffUser(user) && !error) redirect("/");
+  if (user && (await isStaffUser(user)) && !error) redirect("/");
 
   return (
     <main className="login">

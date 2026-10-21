@@ -5,7 +5,10 @@ import { generateWeeklyReviews } from "@/lib/review";
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
-/** POST /api/review?week=0&force=1 — generate the AI appreciation of a week now (normally the bot does it on Sunday). */
+/**
+ * POST /api/review?week=0&force=1 — generate the AI appreciation of a week now (normally the bot's tick does it on Sunday).
+ * Works in batches: if `remaining` > 0 in the response, call it again to continue.
+ */
 export async function POST(req: NextRequest) {
   const guard = await requirePermissionApi("run_review");
   if ("error" in guard) return guard.error;
@@ -17,6 +20,6 @@ export async function POST(req: NextRequest) {
     force: req.nextUrl.searchParams.get("force") === "1",
     actor: { discordId: guard.user.discordId, username: guard.user.username }
   });
-  if (!result.ok) return NextResponse.json({ error: result.error }, { status: 503 });
+  if (!result.ok) return NextResponse.json({ error: result.error }, { status: result.error === "already_running" ? 409 : 503 });
   return NextResponse.json(result);
 }

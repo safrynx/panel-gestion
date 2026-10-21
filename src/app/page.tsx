@@ -19,8 +19,8 @@ export default async function DashboardPage() {
   const fivem = staff.reduce((sum, m) => sum + m.fivemSeconds, 0);
   const inVoice = staff.filter((m) => m.inVoice).length;
   const warned = staff.filter((m) => m.warnLevel > 0).length;
-  const resetAt = getCountersResetAt();
-  const logs = can(user, "view_logs") ? listLogs({ limit: 7 }).rows : null;
+  const resetAt = await getCountersResetAt();
+  const logs = can(user, "view_logs") ? (await listLogs({ limit: 7 })).rows : null;
 
   const stats = [
     { label: "Staff actif", value: staff.length, kind: "int" as const, hint: `${inVoice} en vocal maintenant` },

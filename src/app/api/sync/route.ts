@@ -65,7 +65,7 @@ export async function POST(req: NextRequest) {
     if (!members) {
       return NextResponse.json({ error: "bot_unavailable", hint: "Check DISCORD_BOT_TOKEN and DISCORD_GUILD_ID" }, { status: 503 });
     }
-    const result = syncStaffMembers(members, user.discordId);
+    const result = await syncStaffMembers(members, user.discordId);
     return NextResponse.json({ ok: true, mode: "full", ...result });
   }
   return NextResponse.json({ error: "unknown_mode", hint: "Use ?full=1" }, { status: 400 });

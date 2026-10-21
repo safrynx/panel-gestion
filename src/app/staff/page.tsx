@@ -24,8 +24,7 @@ export default async function StaffPage({ searchParams }: { searchParams: Promis
   const staff = await getStaffOverview(period.days ? new Date(Date.now() - period.days * 86400_000) : undefined);
 
   const owner = isOwner(user);
-  const actorLevel = getActorLevel(user);
-  const ladder = getGradeLadder();
+  const [actorLevel, ladder, resetAt, source] = await Promise.all([getActorLevel(user), getGradeLadder(), getCountersResetAt(), fivemSource()]);
 
   const rows: StaffRow[] = staff.map((m) => {
     const canAct = m.discordId !== user.discordId && (owner || m.gradeLevel < actorLevel);
@@ -52,7 +51,6 @@ export default async function StaffPage({ searchParams }: { searchParams: Promis
     };
   });
   const recruitGrades = ladder.filter((g) => owner || g.level < actorLevel).map((g) => g.name);
-  const resetAt = getCountersResetAt();
   const gradeNames = [...new Set([...ladder].reverse().map((g) => g.name).concat(staff.map((m) => m.grade)))];
 
   return (
@@ -71,7 +69,7 @@ export default async function StaffPage({ searchParams }: { searchParams: Promis
           </>
         }
       >
-        Temps de jeu issu de {fivemSource() === "database" ? "la base du serveur FiveM" : "l'agent FiveM"} · période : {period.label}.{resetAt && <> Compteurs remis à zéro le {formatDateTime(resetAt.toISOString())}.</>}
+        Temps de jeu issu de {source === "database" ? "la base du serveur FiveM" : "l'agent FiveM"} · période : {period.label}.{resetAt && <> Compteurs remis à zéro le {formatDateTime(resetAt.toISOString())}.</>}
       </PageHead>
       <div className="rise rise-1"><StaffTable rows={rows} grades={gradeNames} /></div>
     </Shell>
