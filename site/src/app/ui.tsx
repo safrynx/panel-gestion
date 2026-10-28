@@ -130,12 +130,16 @@ export function describeApiError(data: { error?: string; discordStatus?: number;
     case "unauthenticated": return "Session expirée : reconnecte-toi.";
     case "already_exists": return "Déjà dans la liste.";
     case "bot_unavailable": return "Bot Discord injoignable (token incorrect, ou bot absent de ce serveur Discord).";
-    case "no_guild": return "Aucun serveur Discord lié : renseigne son ID dans Accès & rôles.";
+    case "no_guild": return "Aucun serveur Discord lié : renseigne son ID dans Configuration.";
     case "guild_taken": return "Ce serveur Discord est déjà lié à un autre serveur du panel.";
     case "invalid_timezone": return "Fuseau horaire inconnu (exemple : Europe/Paris).";
     case "last_owner": return "Impossible : le serveur doit garder au moins un propriétaire.";
     case "unknown_server": return "Serveur introuvable.";
     case "forbidden": return "Accès refusé.";
+    case "guild_required": return "Choisis un serveur Discord.";
+    case "guild_not_managed": return "Il te faut la permission « Gérer le serveur » sur ce serveur Discord (reconnecte-toi si tu viens de l'obtenir).";
+    case "too_many_servers": return "Tu as atteint le nombre maximum de serveurs.";
+    case "confirm_mismatch": return "Le nom tapé ne correspond pas : rien n'a été supprimé.";
     default: return `Erreur : ${data.error ?? status}`;
   }
 }

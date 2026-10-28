@@ -1,13 +1,11 @@
 import { requireOwnerPage } from "@/lib/auth";
 import { db } from "@/lib/db";
-import { getPlatformOwnerIds, isPlatformOwner, ladderIn, loadConfig, roleNameIn, warnRolesIn } from "@/lib/config";
-import { botInviteUrl } from "@/lib/discord";
+import { getPlatformOwnerIds, ladderIn, loadConfig, roleNameIn, warnRolesIn } from "@/lib/config";
 import { parsePermissions } from "@/lib/permissions";
 import { listGuildRoles } from "@/lib/roles";
-import { LEGACY_SERVER_ID, serverReviewHour, serverTimeZone } from "@/lib/servers";
+import { LEGACY_SERVER_ID } from "@/lib/servers";
 import Shell, { PageHead } from "@/app/shell";
 import AdminPanel from "./panel";
-import ServerSettings from "./server-settings";
 
 export const dynamic = "force-dynamic";
 
@@ -42,23 +40,10 @@ export default async function AdminPage({ params }: { params: Promise<{ serverId
   }));
 
   const gradeFromEnv = server.id === LEGACY_SERVER_ID && Boolean(process.env.GRADE_ROLE_MAPPING_JSON && process.env.GRADE_ROLE_MAPPING_JSON.trim() !== "{}");
-  const appUrl = (process.env.APP_URL || "http://localhost:3000").replace(/\/+$/, "");
 
   return (
     <Shell user={user} server={server} active="admin">
-      <PageHead kicker={server.name} title="Accès & rôles">Le serveur, qui entre dans son panel, ce que chacun peut faire, et quels rôles Discord pilotent les grades et les avertissements.</PageHead>
-      <ServerSettings
-        name={server.name}
-        guildId={server.guildId}
-        timezone={server.timezone}
-        reviewHour={server.reviewHour}
-        defaultTimezone={serverTimeZone(null)}
-        defaultReviewHour={serverReviewHour(null)}
-        canChangeGuild={isPlatformOwner(user.discordId)}
-        hasFivemToken={server.hasFivemToken}
-        fivemUrl={`${appUrl}/api/fivem`}
-        inviteUrl={botInviteUrl(server.guildId)}
-      />
+      <PageHead kicker={server.name} title="Accès & rôles">Qui entre dans le panel, ce que chacun peut faire, et quels rôles Discord pilotent les grades et les avertissements.</PageHead>
       <AdminPanel
         owners={owners.map((o) => ({ discordId: o.discord_id, display: o.username ?? o.discord_id }))}
         platformOwners={getPlatformOwnerIds()}

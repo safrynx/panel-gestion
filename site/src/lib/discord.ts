@@ -83,11 +83,35 @@ export async function fetchDiscordUser(accessToken: string): Promise<DiscordUser
   return (await res.json()) as DiscordUser;
 }
 
-/** IDs of the guilds the user is in (OAuth `guilds` scope), or null on failure. */
-export async function fetchUserGuildIds(accessToken: string): Promise<string[] | null> {
+export type UserGuild = { id: string; name: string; iconUrl: string | null; canManage: boolean };
+
+type RawUserGuild = { id: string; name: string; icon: string | null; owner?: boolean; permissions?: string };
+
+// Permission bits (the bitfield is a decimal string that can exceed 2^53, hence BigInt).
+const ADMINISTRATOR = BigInt(0x8);
+const MANAGE_GUILD = BigInt(0x20);
+const NONE = BigInt(0);
+
+/** Pure: may this user register the guild? Owner, Administrator or Manage Server (the usual rule of Discord dashboards). */
+export function canManageGuild(guild: { owner?: boolean; permissions?: string }): boolean {
+  if (guild.owner) return true;
+  try {
+    const bits = BigInt(guild.permissions ?? "0");
+    return (bits & ADMINISTRATOR) !== NONE || (bits & MANAGE_GUILD) !== NONE;
+  } catch {
+    return false;
+  }
+}
+
+export function guildIconUrl(id: string, icon: string | null): string | null {
+  return icon ? `https://cdn.discordapp.com/icons/${id}/${icon}.${icon.startsWith("a_") ? "gif" : "png"}?size=128` : null;
+}
+
+/** The guilds the user is in, with whether they can manage each (OAuth `guilds` scope), or null on failure. */
+export async function fetchUserGuilds(accessToken: string): Promise<UserGuild[] | null> {
   const res = await fetch(`${DISCORD_API}/users/@me/guilds?limit=200`, { headers: { Authorization: `Bearer ${accessToken}` } });
   if (!res.ok) return null;
-  return ((await res.json()) as { id: string }[]).map((g) => g.id);
+  return ((await res.json()) as RawUserGuild[]).map((g) => ({ id: g.id, name: g.name, iconUrl: guildIconUrl(g.id, g.icon), canManage: canManageGuild(g) }));
 }
 
 export function avatarUrl(user: DiscordUser): string | null {

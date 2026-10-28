@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { avatarUrl, exchangeCode, fetchDiscordUser, fetchUserGuildIds, getDiscordConfig } from "@/lib/discord";
+import { avatarUrl, exchangeCode, fetchDiscordUser, fetchUserGuilds, getDiscordConfig } from "@/lib/discord";
 import { listAccessibleServers } from "@/lib/auth";
-import { isPlatformOwner } from "@/lib/config";
-import { refreshMemberships } from "@/lib/memberships";
+import { refreshMemberships, storeUserGuilds } from "@/lib/memberships";
 import { encodeSession, sessionCookieName, SESSION_MAX_AGE, verifyAndConsumeState } from "@/lib/session";
 
 export const runtime = "nodejs";
@@ -15,6 +14,10 @@ function fail(error: string, extra = "") {
   return NextResponse.redirect(`${appUrl()}/login?error=${error}${extra}`);
 }
 
+/**
+ * Any Discord user may log in: they land on their servers, or on the page to register their first one.
+ * Their guild list (and which ones they manage) and their roles on the registered servers are refreshed here.
+ */
 export async function GET(req: NextRequest) {
   const url = new URL(req.url);
   const code = url.searchParams.get("code");
@@ -32,16 +35,16 @@ export async function GET(req: NextRequest) {
 
   const user = await fetchDiscordUser(token.access_token);
   if (!user) return fail("oauth_identity");
-  const guildIds = await fetchUserGuildIds(token.access_token);
-  if (!guildIds) return fail("oauth_identity");
+  const guilds = await fetchUserGuilds(token.access_token);
+  if (!guilds) return fail("oauth_identity");
 
   const identity = { discordId: user.id, username: user.global_name || user.username, avatarUrl: avatarUrl(user) };
+  await storeUserGuilds(identity.discordId, guilds);
   // Fresh roles on every registered server the user is in, before deciding where they may go.
-  await refreshMemberships(identity, guildIds);
+  await refreshMemberships(identity, guilds.map((g) => g.id));
   const servers = await listAccessibleServers(identity);
-  if (!servers.length && !isPlatformOwner(identity.discordId)) return fail("forbidden");
 
-  // One server: straight to it. Several (or a platform owner): the server list.
+  // One server: straight to it. None or several: the server list (where a new one can be added).
   const res = NextResponse.redirect(`${appUrl()}${servers.length === 1 ? `/s/${servers[0].id}` : "/"}`);
   res.cookies.set(sessionCookieName, encodeSession(identity), {
     httpOnly: true,

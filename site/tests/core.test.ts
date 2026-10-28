@@ -448,7 +448,7 @@ test("database: batches are atomic, migrations are idempotent and safe to run co
   const before = (await client.execute("SELECT COUNT(*) AS n FROM schema_migrations")).rows[0].n;
   await Promise.all([runMigrations(client), runMigrations(client)]);
   assert.equal((await client.execute("SELECT COUNT(*) AS n FROM schema_migrations")).rows[0].n, before);
-  assert.equal(Number(before), 13);
+  assert.equal(Number(before), 14);
 });
 
 test("bot API: sync snapshot, member event, voice events, heartbeat, playtime, shutdown", async () => {
@@ -693,4 +693,84 @@ test("weekly review and maintenance run per server, in each server's own time zo
     delete process.env.AI_API_KEY;
     await m.status.releaseLock(`review:${t.id}`);
   }
+});
+
+// ---------------------------------------------------------------- self-service
+
+test("Discord permissions: owner, Administrator or Manage Server may register a guild", async () => {
+  const { canManageGuild } = await import("../src/lib/discord");
+  assert.equal(canManageGuild({ owner: true, permissions: "0" }), true);
+  assert.equal(canManageGuild({ permissions: "8" }), true); // Administrator
+  assert.equal(canManageGuild({ permissions: "32" }), true); // Manage Server
+  assert.equal(canManageGuild({ permissions: "2251799813685247" }), true); // every bit, beyond 2^32
+  assert.equal(canManageGuild({ permissions: "1024" }), false); // View Channel only
+  assert.equal(canManageGuild({ permissions: "garbage" }), false);
+  assert.equal(canManageGuild({}), false);
+});
+
+test("self-service: anyone registers a guild they manage, never someone else's, within the per-user limit", async () => {
+  const { storeUserGuilds } = await import("../src/lib/memberships");
+  const USER = "930000000000000001";
+  const MINE = "540000000000000001";
+  const NOT_MINE = "540000000000000002";
+  await storeUserGuilds(USER, [
+    { id: MINE, name: "Mon RP", iconUrl: "https://cdn.discordapp.com/icons/x/y.png", canManage: true },
+    { id: NOT_MINE, name: "Serveur d'un autre", iconUrl: null, canManage: false }
+  ]);
+  const actor = { discordId: USER, platformOwner: false };
+
+  assert.deepEqual((await m.servers.listManageableGuilds(USER)).map((g) => [g.guildId, g.serverId]), [[MINE, null]]);
+  assert.deepEqual(await m.servers.createServerFor(actor, { name: "Pirate", guildId: NOT_MINE }), { ok: false, error: "guild_not_managed" });
+  assert.deepEqual(await m.servers.createServerFor(actor, { name: "Sans Discord", guildId: null }), { ok: false, error: "guild_required" });
+
+  const created = await m.servers.createServerFor(actor, { name: "Mon RP", guildId: MINE });
+  assert.ok(created.ok);
+  assert.equal(created.server.iconUrl, "https://cdn.discordapp.com/icons/x/y.png"); // icon taken from Discord
+  assert.deepEqual(await m.servers.listServerOwners(created.server.id), [USER]);
+  assert.equal(await m.config.hasPanelAccess(created.server.id, USER, []), true);
+  assert.equal((await m.servers.listManageableGuilds(USER))[0].serverId, created.server.id);
+  assert.deepEqual(await m.servers.createServerFor(actor, { name: "Encore", guildId: MINE }), { ok: false, error: "guild_taken" });
+
+  // a new login replaces the cached guild list (lost permission => can no longer register it)
+  await storeUserGuilds(USER, [{ id: NOT_MINE, name: "Serveur d'un autre", iconUrl: null, canManage: false }]);
+  assert.equal(await m.servers.managesGuild(USER, MINE), false);
+
+  // limit per user (platform owners are not limited)
+  process.env.MAX_SERVERS_PER_USER = "1";
+  try {
+    await storeUserGuilds(USER, [{ id: "540000000000000003", name: "Deuxième", iconUrl: null, canManage: true }]);
+    assert.deepEqual(await m.servers.createServerFor(actor, { name: "Deuxième", guildId: "540000000000000003" }), { ok: false, error: "too_many_servers" });
+    const admin = await m.servers.createServerFor({ discordId: "900000000000000001", platformOwner: true }, { name: "Libre", guildId: null });
+    assert.ok(admin.ok);
+    await m.servers.deleteServer(admin.ok ? admin.server.id : "");
+  } finally {
+    delete process.env.MAX_SERVERS_PER_USER;
+  }
+  const clash = await m.servers.createServer({ name: "default", guildId: null, createdBy: USER });
+  assert.ok(clash.ok && clash.server.id !== "default"); // the legacy id is never reused
+  await m.servers.deleteServer(clash.ok ? clash.server.id : "");
+});
+
+test("deleting a server removes all its data and nothing of the other servers", async () => {
+  const doomed = await m.servers.createServer({ name: "A supprimer", guildId: "540000000000000009", createdBy: A });
+  assert.ok(doomed.ok);
+  const id = doomed.server.id;
+  await m.roles.storeGuildRoles(id, [{ id: "640000000000000001", name: "Modo", position: 2, color: 0 }]);
+  await db.run("INSERT INTO grade_roles (role_id, server_id) VALUES ('640000000000000001', ?)", [id]);
+  await m.sync.syncStaffMembers(id, [member(A, ["640000000000000001"])]);
+  await m.voice.openVoiceSession(id, A, ["640000000000000001"], "940000000000000001", new Date());
+  await db.run("INSERT INTO staff_notes (server_id, discord_id, body, author_discord_id) VALUES (?, ?, 'x', ?)", [id, A, B]);
+  await m.status.setServerStatus(id, "heartbeat", new Date().toISOString());
+  await m.servers.rotateFivemToken(id);
+  const legacyBefore = (await m.sync.listStaffWithStats(S)).length;
+
+  assert.equal(await m.servers.deleteServer(id), true);
+  assert.equal(await m.servers.getServer(id), null);
+  for (const table of ["staff_members", "voice_sessions", "staff_notes", "discord_roles", "grade_roles", "server_owners", "audit_log"]) {
+    assert.equal((await db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM ${table} WHERE server_id = ?`, [id]))!.n, 0, table);
+  }
+  assert.equal((await db.get<{ n: number }>("SELECT COUNT(*) AS n FROM bot_status WHERE key LIKE ?", [`${id}:%`]))!.n, 0);
+  assert.equal((await m.sync.listStaffWithStats(S)).length, legacyBefore); // other servers untouched
+  assert.equal(await m.servers.getServerByGuild("540000000000000009"), null); // the guild can be registered again
+  assert.equal(await m.servers.deleteServer(id), false);
 });

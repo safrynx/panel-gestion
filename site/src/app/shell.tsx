@@ -5,7 +5,7 @@ import type { Identity, SessionUser } from "@/lib/types";
 import Avatar from "./avatar";
 import LogoutButton from "./logout-button";
 
-export type NavKey = "dashboard" | "staff" | "report" | "logs" | "admin";
+export type NavKey = "dashboard" | "staff" | "report" | "logs" | "admin" | "settings";
 
 type Props = { user: SessionUser; server: Server; active: NavKey; children: React.ReactNode };
 
@@ -17,7 +17,7 @@ export default function Shell({ user, server, active, children }: Props) {
     { key: "staff", href: `${base}/staff`, label: "Staff" },
     ...(can(user, "view_report") ? [{ key: "report" as const, href: `${base}/report`, label: "Bilan hebdo" }] : []),
     ...(can(user, "view_logs") ? [{ key: "logs" as const, href: `${base}/logs`, label: "Logs" }] : []),
-    ...(isOwner(user) ? [{ key: "admin" as const, href: `${base}/admin`, label: "Accès & rôles" }] : [])
+    ...(isOwner(user) ? [{ key: "admin" as const, href: `${base}/admin`, label: "Accès & rôles" }, { key: "settings" as const, href: `${base}/settings`, label: "Configuration" }] : [])
   ];
 
   return (

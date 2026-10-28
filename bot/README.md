@@ -1,7 +1,7 @@
 # Bot du Dashboard FiveM
 
 Bot Discord du panel. **Un seul bot pour tous les serveurs** : il surveille les serveurs Discord enregistrés sur le site (liste relue toutes les 5 min) et ignore les autres. Il ne stocke rien : il envoie au site (projet `site/`) ce qu'il voit.
-Pour ajouter un serveur : le créer dans le panel, puis inviter le bot sur le serveur Discord (lien dans « Accès & rôles »). Pas besoin de redémarrer le bot.
+Pour ajouter un serveur : le créer dans le panel, puis inviter le bot sur le serveur Discord (lien dans « Configuration »). Pas besoin de redémarrer le bot.
 
 ## Ce qu'il fait
 - **Synchronisation complète** de chaque serveur au démarrage puis toutes les 30 min (et dès qu'un nouveau serveur est enregistré) : rôles (noms + hiérarchie), tous les membres et leurs rôles, qui est en vocal.

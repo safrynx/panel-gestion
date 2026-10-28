@@ -8,7 +8,7 @@ import { refreshGuildRoles } from "@/lib/discord";
 import { ALL_PERMISSIONS, DEFAULT_NEW_PERMISSIONS } from "@/lib/permissions";
 import { roleName } from "@/lib/roles";
 import type { ServerRouteContext } from "@/lib/route";
-import { addServerOwner, isValidTimeZone, listServerOwners, removeServerOwner, rotateFivemToken, updateServer } from "@/lib/servers";
+import { addServerOwner, deleteServer, isValidTimeZone, LEGACY_SERVER_ID, listServerOwners, managesGuild, removeServerOwner, rotateFivemToken, updateServer } from "@/lib/servers";
 
 export const runtime = "nodejs";
 
@@ -31,7 +31,8 @@ const schemas = {
   }),
   owner_add: z.object({ discordId: id }),
   owner_remove: z.object({ discordId: id }),
-  fivem_token_rotate: z.object({})
+  fivem_token_rotate: z.object({}),
+  server_delete: z.object({ confirm: z.string() })
 } as const;
 
 type AccessRow = { kind: "user" | "role"; discord_id: string; label: string | null };
@@ -119,9 +120,10 @@ export async function POST(req: NextRequest, { params }: ServerRouteContext) {
     case "server_update": {
       const settings = data as { name?: string; guildId?: string | null; timezone?: string | null; reviewHour?: number | null };
       if (settings.timezone && !isValidTimeZone(settings.timezone)) return NextResponse.json({ error: "invalid_timezone" }, { status: 400 });
-      // Moving a server to another guild changes whose data it receives: platform owners only.
+      // Moving a server to another guild changes whose data it receives: only to a guild the owner manages on Discord.
       if (settings.guildId !== undefined && settings.guildId !== server.guildId && !isPlatformOwner(actor.discordId)) {
-        return NextResponse.json({ error: "forbidden" }, { status: 403 });
+        if (!settings.guildId) return NextResponse.json({ error: "guild_required" }, { status: 400 });
+        if (!(await managesGuild(actor.discordId, settings.guildId))) return NextResponse.json({ error: "guild_not_managed" }, { status: 403 });
       }
       // An empty time zone means "back to the default".
       const result = await updateServer(serverId, { ...settings, timezone: settings.timezone === "" ? null : settings.timezone });
@@ -148,6 +150,15 @@ export async function POST(req: NextRequest, { params }: ServerRouteContext) {
       await audit(serverId, actor, "fivem_token_rotate", null, {});
       // Shown once: only its hash is kept.
       return NextResponse.json({ ok: true, token });
+    }
+    case "server_delete": {
+      // Typing the exact name guards against a misclick; the legacy server holds the original data: platform owners only.
+      if ((data.confirm as string).trim() !== server.name) return NextResponse.json({ error: "confirm_mismatch" }, { status: 400 });
+      if (serverId === LEGACY_SERVER_ID && !isPlatformOwner(actor.discordId)) return NextResponse.json({ error: "forbidden" }, { status: 403 });
+      await deleteServer(serverId);
+      invalidateConfig(serverId);
+      console.log(`[servers] ${serverId} (${server.name}) deleted by ${actor.discordId}`);
+      return NextResponse.json({ ok: true, deleted: serverId });
     }
   }
   return NextResponse.json({ ok: true });

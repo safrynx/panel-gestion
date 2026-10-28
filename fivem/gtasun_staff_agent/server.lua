@@ -1,5 +1,5 @@
 -- GTASUN Staff Manager — FiveM agent starter.
--- Each server of the panel has its own token (generated in "Accès & rôles"): it tells the panel which server the sessions belong to.
+-- Each server of the panel has its own token (generated in "Configuration"): it tells the panel which server the sessions belong to.
 -- Do not enable production reporting until the API endpoint and token are configured.
 local API_URL = GetConvar('gtasun_staff_api_url', '')
 local API_TOKEN = GetConvar('gtasun_staff_api_token', '')

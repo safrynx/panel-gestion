@@ -10,7 +10,7 @@ import type { Server } from "@/lib/servers";
  */
 export default async function BotBanner({ server }: { server: Server }) {
   if (!server.guildId) {
-    return <div className="banner"><b>Aucun serveur Discord lié.</b> Un propriétaire doit renseigner l&apos;ID du serveur Discord dans « Accès &amp; rôles ».</div>;
+    return <div className="banner"><b>Aucun serveur Discord lié.</b> Un propriétaire doit renseigner l&apos;ID du serveur Discord dans « Configuration ».</div>;
   }
   const [bot, cfg, guildRoles] = await Promise.all([getBotStatus(server.id), loadConfig(server.id), listGuildRoles(server.id)]);
   const warnings: React.ReactNode[] = [];

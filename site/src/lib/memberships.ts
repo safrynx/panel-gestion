@@ -1,10 +1,23 @@
-import { db } from "./db";
-import { fetchGuildMemberByBot, type GuildMemberFull } from "./discord";
+import { db, stmt } from "./db";
+import { fetchGuildMemberByBot, type GuildMemberFull, type UserGuild } from "./discord";
 import { listServers } from "./servers";
 import { upsertStaffMember } from "./sync";
 import type { Identity } from "./types";
 
 type LookupMember = (guildId: string, discordId: string) => Promise<GuildMemberFull | null>;
+
+/** At login: replace the cached list of the user's guilds (which ones they may register as a server). */
+export async function storeUserGuilds(discordId: string, guilds: UserGuild[]): Promise<void> {
+  const now = new Date().toISOString();
+  await db.batch([
+    stmt("DELETE FROM user_guilds WHERE discord_id = ?", [discordId]),
+    ...guilds.map((g) =>
+      stmt("INSERT INTO user_guilds (discord_id, guild_id, name, icon_url, can_manage, updated_at) VALUES (?, ?, ?, ?, ?, ?)", [
+        discordId, g.id, g.name.slice(0, 100), g.iconUrl, g.canManage ? 1 : 0, now
+      ])
+    )
+  ]);
+}
 
 /**
  * At login: for every registered server whose guild the user is in, read their roles there through the bot,

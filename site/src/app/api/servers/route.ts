@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { audit } from "@/lib/audit";
-import { getIdentity, listAccessibleServers, requirePlatformOwnerApi } from "@/lib/auth";
-import { createServer } from "@/lib/servers";
+import { getIdentity, listAccessibleServers } from "@/lib/auth";
+import { isPlatformOwner } from "@/lib/config";
+import { createServerFor } from "@/lib/servers";
 
 export const runtime = "nodejs";
 
@@ -19,16 +20,21 @@ export async function GET() {
   return NextResponse.json({ servers: servers.map((s) => ({ id: s.id, name: s.name, guildId: s.guildId })) });
 }
 
-/** POST /api/servers — register a new server (platform owners only); its creator becomes its owner. */
+const STATUS: Record<string, number> = { guild_taken: 409, too_many_servers: 409, guild_required: 400, guild_not_managed: 403 };
+
+/** POST /api/servers — register a Discord guild the user manages as a new server; they become its owner. */
 export async function POST(req: NextRequest) {
-  const guard = await requirePlatformOwnerApi();
-  if ("error" in guard) return guard.error;
+  const identity = await getIdentity();
+  if (!identity) return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
   const parsed = createSchema.safeParse(await req.json().catch(() => null));
   if (!parsed.success) return NextResponse.json({ error: "validation", issues: parsed.error.issues }, { status: 400 });
 
-  const result = await createServer({ name: parsed.data.name, guildId: parsed.data.guildId ?? null, createdBy: guard.identity.discordId });
-  if (!result.ok) return NextResponse.json({ error: result.error }, { status: 409 });
-  await audit(result.server.id, { discordId: guard.identity.discordId, username: guard.identity.username }, "server_create", null, {
+  const result = await createServerFor(
+    { discordId: identity.discordId, platformOwner: isPlatformOwner(identity.discordId) },
+    { name: parsed.data.name, guildId: parsed.data.guildId ?? null }
+  );
+  if (!result.ok) return NextResponse.json({ error: result.error }, { status: STATUS[result.error] ?? 400 });
+  await audit(result.server.id, { discordId: identity.discordId, username: identity.username }, "server_create", null, {
     nom: result.server.name, guilde: result.server.guildId
   });
   return NextResponse.json({ ok: true, server: result.server });

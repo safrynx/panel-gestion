@@ -3,9 +3,10 @@
 Panel multi-serveurs : connexion Discord, rôles/grades, temps vocal Discord, temps FiveM, pastilles, notes et historique des grades — pour chaque serveur enregistré.
 
 ## Serveurs
-- Page d'accueil `/` : liste des serveurs accessibles ; les administrateurs de la plateforme (`PANEL_OWNER_IDS`) y **ajoutent un serveur** (nom + ID du serveur Discord). Le créateur en devient propriétaire.
+- Page d'accueil `/` : les serveurs accessibles, et **« Ajouter un serveur »** : la liste des serveurs Discord de l'utilisateur où il a « Gérer le serveur » (lue à la connexion, table `user_guilds`). Il en devient propriétaire. Limite `MAX_SERVERS_PER_USER` (5). Les administrateurs de la plateforme (`PANEL_OWNER_IDS`, facultatif) ne sont pas limités et peuvent ajouter un serveur par son ID.
+- Une carte « Mise en route » guide les propriétaires (serveur Discord, bot, rôles de grade, équipe, FiveM) jusqu'à ce que tout soit prêt. Un propriétaire peut supprimer son serveur (Configuration > Zone dangereuse, en tapant son nom).
 - Chaque serveur vit sous `/s/<id>` (`/s/<id>/staff`, `/report`, `/logs`, `/admin`), ses API sous `/api/s/<id>/…`.
-- Dans « Accès & rôles » d'un serveur : nom, serveur Discord, fuseau horaire et heure du bilan IA, propriétaires, **token de l'agent FiveM** (affiché une seule fois, seul son hash est stocké), lien d'invitation du bot.
+- Dans « Configuration » d'un serveur : nom, serveur Discord, fuseau horaire et heure du bilan IA, **token de l'agent FiveM** (affiché une seule fois, seul son hash est stocké), lien d'invitation du bot.
 - Mise à jour depuis la version mono-serveur : automatique, les données existantes deviennent le serveur `default` (voir le README racine).
 
 ## Prérequis
@@ -31,7 +32,7 @@ Sans lui le site fonctionne, mais sans synchronisation des membres ni suivi du v
 - Le rôle du bot doit être **au-dessus** des rôles de grade dans la hiérarchie du serveur.
 
 ## FiveM
-- Générer le token du serveur dans « Accès & rôles » > Agent FiveM : le panel affiche les lignes à coller dans `server.cfg` (`gtasun_staff_api_url` et `gtasun_staff_api_token`). L'ancien `FIVEM_AGENT_TOKEN` partagé reste valable pour le serveur `default`.
+- Générer le token du serveur dans « Configuration » > Agent FiveM : le panel affiche les lignes à coller dans `server.cfg` (`gtasun_staff_api_url` et `gtasun_staff_api_token`). L'ancien `FIVEM_AGENT_TOKEN` partagé reste valable pour le serveur `default`.
 - Installer la ressource `fivem/gtasun_staff_agent` (`ensure gtasun_staff_agent`).
 
 ## Accès au panel

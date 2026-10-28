@@ -345,6 +345,24 @@ const migrations: { name: string; sql: string }[] = [
       UPDATE bot_status SET key = 'default:' || key WHERE key IN ('heartbeat', 'top_role_position', 'counters_reset_at', 'review_done');
       UPDATE activity_sessions SET external_session_id = 'default:' || external_session_id WHERE external_session_id IS NOT NULL;
     `
+  },
+  {
+    // Self-service: the Discord guilds of each user, read at login (OAuth `guilds` scope). `can_manage` = owner,
+    // Administrator or Manage Server: only those guilds can be registered as a server by that user.
+    name: "014_self_service",
+    sql: `
+      CREATE TABLE IF NOT EXISTS user_guilds (
+        discord_id TEXT NOT NULL,
+        guild_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        icon_url TEXT,
+        can_manage INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (discord_id, guild_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_user_guilds_guild ON user_guilds(guild_id);
+      ALTER TABLE servers ADD COLUMN icon_url TEXT;
+    `
   }
 ];
 

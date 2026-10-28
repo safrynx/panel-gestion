@@ -7,6 +7,7 @@ import { formatDateTime } from "@/lib/format";
 import Shell, { PageHead } from "@/app/shell";
 import Avatar from "@/app/avatar";
 import BotBanner from "@/app/bot-banner";
+import SetupChecklist from "@/app/setup-checklist";
 import CountUp from "@/app/count-up";
 import SyncButton from "@/app/sync-button";
 
@@ -33,6 +34,7 @@ export default async function DashboardPage({ params }: { params: Promise<{ serv
   return (
     <Shell user={user} server={server} active="dashboard">
       <BotBanner server={server} />
+      {user.owner && <SetupChecklist server={server} />}
       <PageHead kicker={server.name} title={`Salut ${user.username}`} actions={<>{can(user, "sync") && <SyncButton />}<Link href={`${base}/staff`} className="btn primary">Ouvrir le staff</Link></>}>
         L&apos;état de l&apos;équipe sur les 7 derniers jours.{resetAt && resetAt.getTime() > Date.now() - 7 * 86400_000 && <> Compteurs remis à zéro le {formatDateTime(resetAt.toISOString())}.</>}
       </PageHead>

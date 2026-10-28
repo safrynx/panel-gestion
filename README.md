@@ -22,8 +22,9 @@ FiveM (1 par serveur) ──(HTTPS, Bearer <token du serveur>)──────
 - Le token d'un agent FiveM désigne son serveur : un agent ne peut jamais écrire dans un autre serveur.
 
 ## Qui voit quoi
-- **Administrateurs de la plateforme** (`PANEL_OWNER_IDS` dans `site/.env`) : tous les serveurs, tous les droits, et eux seuls créent des serveurs (page d'accueil).
-- **Propriétaires d'un serveur** (le créateur, puis ceux qu'il ajoute) : tous les droits sur ce serveur, et sa page « Accès & rôles ».
+- **N'importe qui** se connecte avec Discord et **ajoute son serveur** : seulement un serveur Discord où il est propriétaire, administrateur ou a « Gérer le serveur » (limite `MAX_SERVERS_PER_USER`, 5 par défaut). Il en devient propriétaire et la page Configuration le guide (bot, rôles, équipe, FiveM).
+- **Administrateurs de la plateforme** (`PANEL_OWNER_IDS` dans `site/.env`, facultatif) : tous les serveurs, tous les droits, sans limite, ajout manuel de n'importe quel serveur Discord.
+- **Propriétaires d'un serveur** (le créateur, puis ceux qu'il ajoute) : tous les droits sur ce serveur, ses pages « Configuration » et « Accès & rôles », et peuvent le supprimer (avec toutes ses données).
 - **Accès & permissions** (personnes ou rôles Discord) : définis séparément pour chaque serveur.
 
 ## Migration depuis la version mono-serveur

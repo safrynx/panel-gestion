@@ -11,8 +11,9 @@ type Props = {
   reviewHour: number | null;
   defaultTimezone: string;
   defaultReviewHour: number;
-  /** Only platform owners may move a server to another Discord guild. */
-  canChangeGuild: boolean;
+  /** Platform owners type any guild ID; other owners pick one of the guilds they manage. */
+  freeGuildInput: boolean;
+  guildOptions: { id: string; name: string }[];
   hasFivemToken: boolean;
   fivemUrl: string;
   inviteUrl: string | null;
@@ -55,7 +56,7 @@ export default function ServerSettings(props: Props) {
       timezone: timezone.trim(),
       reviewHour: reviewHour === "" ? null : Number(reviewHour)
     };
-    if (props.canChangeGuild) payload.guildId = guildId.trim() || null;
+    if (guildId.trim() !== (props.guildId ?? "")) payload.guildId = guildId.trim() || null;
     if (await post("server_update", payload)) {
       toast("Serveur enregistré", "ok");
       router.refresh();
@@ -89,8 +90,16 @@ export default function ServerSettings(props: Props) {
             <input required minLength={2} maxLength={60} value={name} onChange={(e) => setName(e.target.value)} className="field" />
           </label>
           <label style={{ display: "grid", gap: 6 }}>
-            <span className="muted" style={{ fontSize: 12 }}>ID du serveur Discord{props.canChangeGuild ? "" : " (modifiable par un administrateur de la plateforme)"}</span>
-            <input value={guildId} onChange={(e) => setGuildId(e.target.value)} disabled={!props.canChangeGuild} placeholder="ex. 123456789012345678" pattern="\d{17,20}" className="field" />
+            <span className="muted" style={{ fontSize: 12 }}>Serveur Discord{props.freeGuildInput ? " (ID)" : " · parmi ceux où tu as « Gérer le serveur »"}</span>
+            {props.freeGuildInput ? (
+              <input value={guildId} onChange={(e) => setGuildId(e.target.value)} placeholder="ex. 123456789012345678" pattern="\d{17,20}" className="field" />
+            ) : (
+              <select value={guildId} onChange={(e) => setGuildId(e.target.value)} className="field">
+                {!props.guildId && <option value="">Choisir un serveur Discord…</option>}
+                {props.guildId && !props.guildOptions.some((g) => g.id === props.guildId) && <option value={props.guildId}>{props.guildId} (actuel)</option>}
+                {props.guildOptions.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+              </select>
+            )}
           </label>
           <div style={{ display: "grid", gap: 12, gridTemplateColumns: "2fr 1fr" }}>
             <label style={{ display: "grid", gap: 6 }}>
