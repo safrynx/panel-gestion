@@ -1,0 +1,25 @@
+{
+  "name": "gtasun-staff-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Discord bot of the FiveM dashboard: reports members, roles and voice activity of every registered server to the site",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "tsx watch --env-file=.env src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/api.test.ts tests/playtime.test.ts"
+  },
+  "engines": {
+    "node": ">=20.6"
+  },
+  "dependencies": {
+    "discord.js": "^14.18.0",
+    "mysql2": "^3.24.6",
+    "tsx": "^4.19.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "typescript": "^5.7.3"
+  }
+}
