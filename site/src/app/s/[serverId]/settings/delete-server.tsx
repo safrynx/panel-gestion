@@ -24,7 +24,7 @@ export default function DeleteServer({ name }: { name: string }) {
       const res = await fetch(paths.api("access?kind=server_delete"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirm: confirm.value }) });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) return toast(describeApiError(data, res.status), "error");
-      router.push("/?deleted=1");
+      router.push("/servers?deleted=1");
     } catch {
       toast("Impossible de joindre le serveur.", "error");
     } finally {

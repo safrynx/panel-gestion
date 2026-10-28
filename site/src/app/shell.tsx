@@ -32,13 +32,13 @@ export default function Shell({ user, server, active, children }: Props) {
               <i>{String(i + 1).padStart(2, "0")}</i>{item.label}
             </Link>
           ))}
-          <Link href="/" style={{ marginTop: 18 }}><i>⇄</i>Changer de serveur</Link>
+          <Link href="/servers" style={{ marginTop: 18 }}><i>⇄</i>Changer de serveur</Link>
         </>
       }
       topLinks={
         <>
           {items.map((item) => <Link key={item.key} href={item.href} data-active={item.key === active}>{item.label}</Link>)}
-          <Link href="/">Serveurs</Link>
+          <Link href="/servers">Serveurs</Link>
         </>
       }
     >
@@ -66,7 +66,7 @@ export function Frame({ identity, brandHref, title, nav, topLinks, children }: F
         <Link href={brandHref} className="brand">
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src="/logo.png" alt="" />
-          <div><b>{title}</b><small>Dashboard FiveM</small></div>
+          <div><b>{title}</b><small>Fiverax</small></div>
         </Link>
         <nav className="nav">{nav}</nav>
         <div className="me">

@@ -29,5 +29,5 @@ export async function GET() {
   }
 
   const ok = missing.length === 0 && database === "ok";
-  return NextResponse.json({ ok, app: "gtasun-staff-manager", missingEnv: missing, database }, { status: ok ? 200 : 503 });
+  return NextResponse.json({ ok, app: "fiverax", missingEnv: missing, database }, { status: ok ? 200 : 503 });
 }

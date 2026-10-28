@@ -157,7 +157,7 @@ export async function requireStaffPage(serverId: string): Promise<{ user: Sessio
   const server = await getServer(serverId);
   if (!server) notFound();
   const user = await getSessionUser(serverId);
-  if (!user) redirect("/?error=forbidden");
+  if (!user) redirect("/servers?error=forbidden");
   return { user, server };
 }
 

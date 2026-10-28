@@ -92,5 +92,5 @@ export function GuildIcon({ url, name, size = 40 }: { url: string | null; name: 
   // eslint-disable-next-line @next/next/no-img-element
   if (url) return <img src={url} alt="" style={style} />;
   const initials = name.split(/\s+/).map((w) => w[0]).join("").slice(0, 2).toUpperCase();
-  return <span style={{ ...style, display: "grid", placeItems: "center", background: "rgba(139,92,246,.18)", fontWeight: 700, fontSize: size * 0.36 }}>{initials}</span>;
+  return <span style={{ ...style, display: "grid", placeItems: "center", background: "rgba(var(--accent-rgb),.18)", fontWeight: 700, fontSize: size * 0.36 }}>{initials}</span>;
 }

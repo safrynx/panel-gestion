@@ -45,7 +45,7 @@ export async function GET(req: NextRequest) {
   const servers = await listAccessibleServers(identity);
 
   // One server: straight to it. None or several: the server list (where a new one can be added).
-  const res = NextResponse.redirect(`${appUrl()}${servers.length === 1 ? `/s/${servers[0].id}` : "/"}`);
+  const res = NextResponse.redirect(`${appUrl()}${servers.length === 1 ? `/s/${servers[0].id}` : "/servers"}`);
   res.cookies.set(sessionCookieName, encodeSession(identity), {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
