@@ -1,84 +1,91 @@
 import Link from "next/link";
+import { ChevronsUpDown, KeyRound, LayoutDashboard, type LucideIcon, ScrollText, Settings, TrendingUp, Users } from "lucide-react";
 import { can, isOwner } from "@/lib/auth";
 import type { Server } from "@/lib/servers";
 import type { Identity, SessionUser } from "@/lib/types";
 import Avatar from "./avatar";
+import { Mark } from "./brand";
 import LogoutButton from "./logout-button";
+import { GuildIcon } from "./new-server-form";
 
 export type NavKey = "dashboard" | "staff" | "report" | "logs" | "admin" | "settings";
 
+export type NavItem = { href: string; label: string; icon: LucideIcon; active?: boolean };
+export type NavSection = { label: string; items: NavItem[] };
+
 type Props = { user: SessionUser; server: Server; active: NavKey; children: React.ReactNode };
 
-/** Layout of the pages of one server: its navigation, a link back to the server list, the logged-in user. */
+/** Layout of the pages of one server: its navigation, the server switcher, the logged-in user. */
 export default function Shell({ user, server, active, children }: Props) {
   const base = `/s/${server.id}`;
-  const items: { key: NavKey; href: string; label: string }[] = [
-    { key: "dashboard", href: base, label: "Accueil" },
-    { key: "staff", href: `${base}/staff`, label: "Staff" },
-    ...(can(user, "view_report") ? [{ key: "report" as const, href: `${base}/report`, label: "Bilan hebdo" }] : []),
-    ...(can(user, "view_logs") ? [{ key: "logs" as const, href: `${base}/logs`, label: "Logs" }] : []),
-    ...(isOwner(user) ? [{ key: "admin" as const, href: `${base}/admin`, label: "Accès & rôles" }, { key: "settings" as const, href: `${base}/settings`, label: "Configuration" }] : [])
+  const item = (key: NavKey, href: string, label: string, icon: LucideIcon): NavItem => ({ href, label, icon, active: key === active });
+  const sections: NavSection[] = [
+    {
+      label: "Pilotage",
+      items: [
+        item("dashboard", base, "Accueil", LayoutDashboard),
+        item("staff", `${base}/staff`, "Staff", Users),
+        ...(can(user, "view_report") ? [item("report", `${base}/report`, "Bilan hebdo", TrendingUp)] : []),
+        ...(can(user, "view_logs") ? [item("logs", `${base}/logs`, "Logs", ScrollText)] : [])
+      ]
+    },
+    ...(isOwner(user)
+      ? [{ label: "Administration", items: [item("admin", `${base}/admin`, "Accès & rôles", KeyRound), item("settings", `${base}/settings`, "Configuration", Settings)] }]
+      : [])
   ];
 
-  return (
-    <Frame
-      identity={user}
-      brandHref={base}
-      title={server.name}
-      nav={
-        <>
-          {items.map((item, i) => (
-            <Link key={item.key} href={item.href} data-active={item.key === active}>
-              <i>{String(i + 1).padStart(2, "0")}</i>{item.label}
-            </Link>
-          ))}
-          <Link href="/servers" style={{ marginTop: 18 }}><i>⇄</i>Changer de serveur</Link>
-        </>
-      }
-      topLinks={
-        <>
-          {items.map((item) => <Link key={item.key} href={item.href} data-active={item.key === active}>{item.label}</Link>)}
-          <Link href="/servers">Serveurs</Link>
-        </>
-      }
-    >
-      {children}
-    </Frame>
-  );
+  return <Frame identity={user} server={server} sections={sections}>{children}</Frame>;
 }
 
 type FrameProps = {
   identity: Identity;
-  brandHref: string;
-  title: string;
-  /** Sidebar links (desktop). */
-  nav: React.ReactNode;
-  /** Top bar links (mobile). */
-  topLinks: React.ReactNode;
+  /** The server being managed (shown in the switcher), or none on the server list. */
+  server?: Server;
+  sections: NavSection[];
   children: React.ReactNode;
 };
 
-/** Bare layout (sidebar, top bar, content), shared by the server pages and the server list. */
-export function Frame({ identity, brandHref, title, nav, topLinks, children }: FrameProps) {
+/** Bare layout (sidebar, mobile top bar, content), shared by the server pages and the server list. */
+export function Frame({ identity, server, sections, children }: FrameProps) {
+  const items = sections.flatMap((s) => s.items);
   return (
     <div>
       <aside className="side">
-        <Link href={brandHref} className="brand">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src="/logo.png" alt="" />
-          <div><b>{title}</b><small>Fiverax</small></div>
-        </Link>
-        <nav className="nav">{nav}</nav>
+        <Link href="/servers" className="brand"><Mark size={30} /><b>Fiverax</b></Link>
+
+        {server && (
+          <Link href="/servers" className="switcher" title="Changer de serveur">
+            <GuildIcon url={server.iconUrl} name={server.name} size={34} />
+            <div><small>Serveur</small><b>{server.name}</b></div>
+            <ChevronsUpDown size={15} />
+          </Link>
+        )}
+
+        <nav className="nav">
+          {sections.map((section) => (
+            <div key={section.label}>
+              <div className="nav-label">{section.label}</div>
+              {section.items.map((it) => (
+                <Link key={it.href} href={it.href} data-active={Boolean(it.active)}>
+                  <it.icon size={17} strokeWidth={1.8} />{it.label}
+                </Link>
+              ))}
+            </div>
+          ))}
+        </nav>
+
         <div className="me">
           <Avatar url={identity.avatarUrl} name={identity.username} size={34} />
           <div><b>{identity.username}</b><LogoutButton /></div>
         </div>
       </aside>
+
       <div className="topbar">
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src="/logo.png" alt="" />
-        {topLinks}
+        <Link href="/servers" aria-label="Mes serveurs"><Mark size={26} /></Link>
+        {items.map((it) => <Link key={it.href} href={it.href} data-active={Boolean(it.active)}>{it.label}</Link>)}
+        {server && <Link href="/servers">Serveurs</Link>}
       </div>
+
       <main className="main"><div className="content">{children}</div></main>
     </div>
   );

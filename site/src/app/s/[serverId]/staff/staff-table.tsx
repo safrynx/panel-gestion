@@ -167,7 +167,7 @@ export default function StaffTable({ rows, grades }: { rows: StaffRow[]; grades:
                 </td>
                 <td className="num-cell">{formatDuration(m.voiceSeconds)}</td>
                 <td className="num-cell">{formatDuration(m.fivemSeconds)}</td>
-                <td className="muted" style={{ fontSize: 12 }}>
+                <td className="muted" style={{ fontSize: 12, whiteSpace: "nowrap" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}><span className={`dot ${m.inVoice ? "on" : ""}`} />{m.inVoice ? "En vocal" : "Hors vocal"}</div>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4 }}><span className={`dot ${m.inFivem ? "on" : ""}`} />{m.inFivem ? "En jeu" : "Hors jeu"}</div>
                 </td>

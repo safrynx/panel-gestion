@@ -51,7 +51,7 @@ export default function AddServer({ guilds, accessible, manual, remaining }: Pro
       )}
       <div style={{ display: "grid", gap: 10 }}>
         {[...free, ...taken].map((g) => (
-          <div key={g.guildId} style={{ display: "flex", alignItems: "center", gap: 14, padding: "12px 14px", border: "1px solid var(--line-2)", borderRadius: 12 }}>
+          <div key={g.guildId} className="guild-row">
             <GuildIcon url={g.iconUrl} name={g.name} />
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{g.name}</div>
@@ -78,7 +78,7 @@ export default function AddServer({ guilds, accessible, manual, remaining }: Pro
           style={{ display: "grid", gap: 12, marginTop: 26, paddingTop: 18, borderTop: "1px solid var(--line)" }}
         >
           <div className="eyebrow">Admin plateforme · ajout manuel</div>
-          <input required minLength={2} maxLength={60} value={name} onChange={(e) => setName(e.target.value)} placeholder="Nom du serveur (ex. GTA Sun RP)" className="field" />
+          <input required minLength={2} maxLength={60} value={name} onChange={(e) => setName(e.target.value)} placeholder="Nom du serveur (ex. Mon serveur RP)" className="field" />
           <input value={guildId} onChange={(e) => setGuildId(e.target.value)} pattern="\d{17,20}" placeholder="ID du serveur Discord (facultatif)" className="field" />
           <div><button className="btn" disabled={busy !== null}>{busy === "manual" ? "Création…" : "Créer le serveur"}</button></div>
         </form>
@@ -92,5 +92,5 @@ export function GuildIcon({ url, name, size = 40 }: { url: string | null; name: 
   // eslint-disable-next-line @next/next/no-img-element
   if (url) return <img src={url} alt="" style={style} />;
   const initials = name.split(/\s+/).map((w) => w[0]).join("").slice(0, 2).toUpperCase();
-  return <span style={{ ...style, display: "grid", placeItems: "center", background: "rgba(var(--accent-rgb),.18)", fontWeight: 700, fontSize: size * 0.36 }}>{initials}</span>;
+  return <span style={{ ...style, display: "grid", placeItems: "center", background: "rgba(var(--accent-rgb),.16)", color: "var(--accent-soft)", fontWeight: 700, fontSize: size * 0.36 }}>{initials}</span>;
 }
