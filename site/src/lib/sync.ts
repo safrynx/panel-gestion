@@ -26,9 +26,9 @@ type Known = Map<string, { id: string; active: boolean }>;
 const DEFAULT_GRADE = { grade: "Staff", gradeLevel: 0 };
 
 const UPSERT_SQL = `
-  INSERT INTO staff_members (id, discord_id, username, avatar_url, grade, grade_level, created_at, updated_at, guild_joined_at, left_guild_at, roles_json, last_synced_at)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
-  ON CONFLICT(discord_id) DO UPDATE SET
+  INSERT INTO staff_members (id, server_id, discord_id, username, avatar_url, grade, grade_level, created_at, updated_at, guild_joined_at, left_guild_at, roles_json, last_synced_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+  ON CONFLICT(server_id, discord_id) DO UPDATE SET
     username = excluded.username,
     avatar_url = excluded.avatar_url,
     grade = excluded.grade,
@@ -42,45 +42,46 @@ const UPSERT_SQL = `
 
 const MARK_LEFT_SQL = `
   UPDATE staff_members SET left_guild_at = ?, updated_at = ?, roles_json = ?, last_synced_at = ?
-  WHERE discord_id = ? AND left_guild_at IS NULL
+  WHERE server_id = ? AND discord_id = ? AND left_guild_at IS NULL
 `;
 
 /**
  * Decide what to write for one member, without touching the database.
  * Members without a staff role (or no longer in the guild) are marked left, never deleted,
- * so notes/badges/history (separate tables keyed by discord_id) are preserved.
+ * so notes/badges/history (separate tables keyed by server + discord_id) are preserved.
  */
 function plan(cfg: ConfigSnapshot, known: Known, member: SyncedMember, now: string): { kind: MemberKind; statement: Stmt | null } {
   const existing = known.get(member.discordId);
   if (!member.presentInGuild || !hasStaffRoleIn(cfg, member.roleIds)) {
     if (!existing?.active) return { kind: "skipped", statement: null };
-    return { kind: "left", statement: stmt(MARK_LEFT_SQL, [now, now, JSON.stringify(member.roleIds), now, member.discordId]) };
+    return { kind: "left", statement: stmt(MARK_LEFT_SQL, [now, now, JSON.stringify(member.roleIds), now, cfg.serverId, member.discordId]) };
   }
   const { grade, gradeLevel } = resolveGradeIn(cfg, member.roleIds) ?? DEFAULT_GRADE;
   return {
     kind: existing ? "updated" : "inserted",
     statement: stmt(UPSERT_SQL, [
-      existing?.id ?? randomUUID(), member.discordId, member.username, member.avatarUrl, grade, gradeLevel,
+      existing?.id ?? randomUUID(), cfg.serverId, member.discordId, member.username, member.avatarUrl, grade, gradeLevel,
       now, now, member.joinedAt, JSON.stringify(member.roleIds), now
     ])
   };
 }
 
-async function loadKnown(): Promise<Known> {
+async function loadKnown(serverId: string): Promise<Known> {
   const rows = await db.all<{ id: string; discord_id: string; left_guild_at: string | null }>(
-    "SELECT id, discord_id, left_guild_at FROM staff_members"
+    "SELECT id, discord_id, left_guild_at FROM staff_members WHERE server_id = ?",
+    [serverId]
   );
   return new Map(rows.map((r) => [r.discord_id, { id: r.id, active: r.left_guild_at === null }]));
 }
 
 /**
- * Sync staff members from a full Discord guild snapshot, in one atomic batch.
- * - No duplicates (UNIQUE discord_id, INSERT ... ON CONFLICT).
+ * Sync a server's staff members from a full snapshot of its Discord guild, in one atomic batch.
+ * - No duplicates (UNIQUE(server_id, discord_id), INSERT ... ON CONFLICT).
  * - Members absent from the snapshot or without staff roles are marked left_guild_at.
  */
-export async function syncStaffMembers(members: SyncedMember[], actorDiscordId = "system"): Promise<SyncResult> {
-  const cfg = await loadConfig();
-  const known = await loadKnown();
+export async function syncStaffMembers(serverId: string, members: SyncedMember[], actorDiscordId = "system"): Promise<SyncResult> {
+  const cfg = await loadConfig(serverId);
+  const known = await loadKnown(serverId);
   const now = new Date().toISOString();
   const statements: Stmt[] = [];
   const counts = { inserted: 0, updated: 0, markedLeft: 0 };
@@ -96,22 +97,22 @@ export async function syncStaffMembers(members: SyncedMember[], actorDiscordId =
   }
   for (const [discordId, row] of known) {
     if (seen.has(discordId) || !row.active) continue;
-    statements.push(stmt(MARK_LEFT_SQL, [now, now, "[]", now, discordId]));
+    statements.push(stmt(MARK_LEFT_SQL, [now, now, "[]", now, serverId, discordId]));
     counts.markedLeft++;
   }
 
   const result = { ...counts, total: members.length };
-  statements.push(auditStmt(actorDiscordId, "staff_sync", null, result));
+  statements.push(auditStmt(serverId, actorDiscordId, "staff_sync", null, result));
   await db.batch(statements);
   return result;
 }
 
 /** Statements to register / refresh / retire one member; compose them into a larger atomic batch if needed. */
-export async function memberStatements(member: SyncedMember): Promise<{ kind: MemberKind; statements: Stmt[] }> {
-  const cfg = await loadConfig();
+export async function memberStatements(serverId: string, member: SyncedMember): Promise<{ kind: MemberKind; statements: Stmt[] }> {
+  const cfg = await loadConfig(serverId);
   const rows = await db.all<{ id: string; left_guild_at: string | null }>(
-    "SELECT id, left_guild_at FROM staff_members WHERE discord_id = ?",
-    [member.discordId]
+    "SELECT id, left_guild_at FROM staff_members WHERE server_id = ? AND discord_id = ?",
+    [serverId, member.discordId]
   );
   const known: Known = new Map(rows.map((r) => [member.discordId, { id: r.id, active: r.left_guild_at === null }]));
   const { kind, statement } = plan(cfg, known, member, new Date().toISOString());
@@ -119,8 +120,8 @@ export async function memberStatements(member: SyncedMember): Promise<{ kind: Me
 }
 
 /** Incremental update for one member (bot member events, OAuth login). Does not touch other members. */
-export async function upsertStaffMember(member: SyncedMember): Promise<MemberKind> {
-  const { kind, statements } = await memberStatements(member);
+export async function upsertStaffMember(serverId: string, member: SyncedMember): Promise<MemberKind> {
+  const { kind, statements } = await memberStatements(serverId, member);
   await db.batch(statements);
   return kind;
 }
@@ -160,14 +161,14 @@ const sessionSeconds = (live: string) => `CASE WHEN ended_at IS NULL
   ELSE seconds END`;
 
 /**
- * Aggregate voice/fivem seconds + latest active badge + note count per active member, in one query.
+ * Aggregate voice/fivem seconds + latest active badge + note count per active member of a server, in one query.
  * Voice time comes from `voice_sessions` (written by the bot), FiveM time from
  * `activity_sessions` (written by the FiveM agent). `since`/`until` restrict sessions by start date;
  * `onlyDiscordId` restricts the result to a single member.
  */
-export async function listStaffWithStats(since?: Date, until?: Date, onlyDiscordId?: string): Promise<StaffWithStats[]> {
+export async function listStaffWithStats(serverId: string, since?: Date, until?: Date, onlyDiscordId?: string): Promise<StaffWithStats[]> {
   // Voice sessions are only live while the bot runs; otherwise they count up to its last heartbeat.
-  const bot = await getBotStatus();
+  const bot = await getBotStatus(serverId);
   const liveVoice = bot.alive ? new Date().toISOString() : bot.heartbeatAt ?? "1970-01-01T00:00:00.000Z";
   const rows = await db.all<{
     id: string; discord_id: string; username: string; avatar_url: string | null; grade: string; grade_level: number;
@@ -183,7 +184,7 @@ export async function listStaffWithStats(since?: Date, until?: Date, onlyDiscord
       COALESCE(f.seconds, 0) AS fivem_seconds,
       (
         SELECT color FROM staff_badges b
-        WHERE b.discord_id = s.discord_id AND b.status = 'active'
+        WHERE b.server_id = s.server_id AND b.discord_id = s.discord_id AND b.status = 'active'
         ORDER BY b.created_at DESC, b.id DESC LIMIT 1
       ) AS badge_color,
       COALESCE(n.notes_count, 0) AS notes_count,
@@ -191,32 +192,33 @@ export async function listStaffWithStats(since?: Date, until?: Date, onlyDiscord
       COALESCE(v.open_count, 0) AS voice_open,
       s.roles_json AS roles_json,
       ln.body AS note_body, ln.created_at AS note_at,
-      COALESCE(ln.author_name, (SELECT username FROM staff_members x WHERE x.discord_id = ln.author_discord_id), ln.author_discord_id) AS note_author,
-      (SELECT COUNT(*) FROM warnings w WHERE w.discord_id = s.discord_id AND w.removed_at IS NULL) AS active_warnings,
+      COALESCE(ln.author_name, (SELECT username FROM staff_members x WHERE x.server_id = s.server_id AND x.discord_id = ln.author_discord_id), ln.author_discord_id) AS note_author,
+      (SELECT COUNT(*) FROM warnings w WHERE w.server_id = s.server_id AND w.discord_id = s.discord_id AND w.removed_at IS NULL) AS active_warnings,
       COALESCE(f.open_count, 0) AS fivem_open
     FROM staff_members s
     LEFT JOIN (
       SELECT discord_id, SUM(${sessionSeconds("liveVoice")}) AS seconds, MAX(started_at) AS last_start,
              SUM(ended_at IS NULL) AS open_count
-      FROM voice_sessions WHERE (@since IS NULL OR started_at >= @since) AND (@until IS NULL OR started_at < @until)
+      FROM voice_sessions WHERE server_id = @server AND (@since IS NULL OR started_at >= @since) AND (@until IS NULL OR started_at < @until)
       GROUP BY discord_id
     ) v ON v.discord_id = s.discord_id
     LEFT JOIN (
       SELECT discord_id, SUM(${sessionSeconds("liveFivem")}) AS seconds, MAX(started_at) AS last_start,
              SUM(ended_at IS NULL) AS open_count
-      FROM activity_sessions WHERE source = 'fivem' AND (@since IS NULL OR started_at >= @since) AND (@until IS NULL OR started_at < @until)
+      FROM activity_sessions WHERE server_id = @server AND source = 'fivem' AND (@since IS NULL OR started_at >= @since) AND (@until IS NULL OR started_at < @until)
       GROUP BY discord_id
     ) f ON f.discord_id = s.discord_id
     LEFT JOIN staff_notes ln ON ln.id = (
-      SELECT id FROM staff_notes WHERE discord_id = s.discord_id ORDER BY created_at DESC, id DESC LIMIT 1
+      SELECT id FROM staff_notes WHERE server_id = s.server_id AND discord_id = s.discord_id ORDER BY created_at DESC, id DESC LIMIT 1
     )
     LEFT JOIN (
-      SELECT discord_id, COUNT(*) AS notes_count FROM staff_notes GROUP BY discord_id
+      SELECT discord_id, COUNT(*) AS notes_count FROM staff_notes WHERE server_id = @server GROUP BY discord_id
     ) n ON n.discord_id = s.discord_id
-    WHERE s.left_guild_at IS NULL AND (@only IS NULL OR s.discord_id = @only)
+    WHERE s.server_id = @server AND s.left_guild_at IS NULL AND (@only IS NULL OR s.discord_id = @only)
     ORDER BY s.grade_level DESC, s.username COLLATE NOCASE
     `,
     {
+      server: serverId,
       since: since ? since.toISOString() : null,
       until: until ? until.toISOString() : null,
       only: onlyDiscordId ?? null,
@@ -255,14 +257,15 @@ export type MemberDetail = {
   gradeHistory: { id: number; old_grade: string; new_grade: string; actor_discord_id: string; reason: string; sync_status: string; created_at: string }[];
 };
 
-/** Full record for one member: stats, badges, notes, warnings, grade history (newest first). */
-export async function getMemberDetail(discordId: string, since?: Date): Promise<MemberDetail> {
+/** Full record for one member of a server: stats, badges, notes, warnings, grade history (newest first). */
+export async function getMemberDetail(serverId: string, discordId: string, since?: Date): Promise<MemberDetail> {
+  const args = [serverId, discordId];
   const [list, badges, notes, warnings, gradeHistory] = await Promise.all([
-    listStaffWithStats(since, undefined, discordId),
-    db.all<MemberDetail["badges"][number]>("SELECT id, color, reason, author_discord_id, status, created_at, resolved_at FROM staff_badges WHERE discord_id = ? ORDER BY created_at DESC, id DESC", [discordId]),
-    db.all<MemberDetail["notes"][number]>("SELECT id, body, author_discord_id, author_name, created_at FROM staff_notes WHERE discord_id = ? ORDER BY created_at DESC, id DESC", [discordId]),
-    db.all<MemberDetail["warnings"][number]>("SELECT id, level, reason, author_discord_id, created_at, removed_at, removed_by, removed_reason FROM warnings WHERE discord_id = ? ORDER BY created_at DESC, id DESC", [discordId]),
-    db.all<MemberDetail["gradeHistory"][number]>("SELECT id, old_grade, new_grade, actor_discord_id, reason, sync_status, created_at FROM grade_history WHERE discord_id = ? ORDER BY created_at DESC, id DESC", [discordId])
+    listStaffWithStats(serverId, since, undefined, discordId),
+    db.all<MemberDetail["badges"][number]>("SELECT id, color, reason, author_discord_id, status, created_at, resolved_at FROM staff_badges WHERE server_id = ? AND discord_id = ? ORDER BY created_at DESC, id DESC", args),
+    db.all<MemberDetail["notes"][number]>("SELECT id, body, author_discord_id, author_name, created_at FROM staff_notes WHERE server_id = ? AND discord_id = ? ORDER BY created_at DESC, id DESC", args),
+    db.all<MemberDetail["warnings"][number]>("SELECT id, level, reason, author_discord_id, created_at, removed_at, removed_by, removed_reason FROM warnings WHERE server_id = ? AND discord_id = ? ORDER BY created_at DESC, id DESC", args),
+    db.all<MemberDetail["gradeHistory"][number]>("SELECT id, old_grade, new_grade, actor_discord_id, reason, sync_status, created_at FROM grade_history WHERE server_id = ? AND discord_id = ? ORDER BY created_at DESC, id DESC", args)
   ]);
   return { member: list[0] ?? null, badges, notes, warnings, gradeHistory };
 }

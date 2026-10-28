@@ -4,7 +4,7 @@ import { applySync, syncSchema } from "@/lib/bot-api";
 
 export const runtime = "nodejs";
 
-/** POST /api/bot/sync — full snapshot from the bot (roles, members, who is in voice). Authenticated with BOT_API_TOKEN. */
+/** POST /api/bot/sync — full snapshot of one guild from the bot (roles, members, who is in voice). Authenticated with BOT_API_TOKEN. */
 export function POST(req: NextRequest) {
   return handleBotRequest(req, syncSchema, applySync);
 }

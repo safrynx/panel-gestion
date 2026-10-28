@@ -1,4 +1,3 @@
-import { timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import { db, stmt } from "./db";
 
@@ -6,25 +5,16 @@ import { db, stmt } from "./db";
  * FiveM agent session ingestion.
  *
  * SECURITY MODEL:
- * The agent authenticates with a shared secret (FIVEM_AGENT_TOKEN) using a
- * constant-time comparison. The agent reports the FiveM player's identifiers,
- * including their `discord:xxxxx` identifier captured SERVER-SIDE by FiveM
- * (linked via the player's Discord Rich Presence / connected accounts).
+ * Each server's agent authenticates with that server's own token (see servers.ts: only a hash is stored,
+ * the old shared FIVEM_AGENT_TOKEN still maps to the legacy server). The token decides which server the
+ * session belongs to: an agent can never write into another server. The agent reports the player's
+ * `discord:xxxxx` identifier captured SERVER-SIDE by FiveM (linked via the player's connected accounts).
  *
  * A `discord_id` sent directly by a *browser* client is NEVER accepted — only
- * the FiveM server agent (holding the token) can report sessions. The
+ * a FiveM server agent (holding a token) can report sessions. The
  * discord_id therefore comes from the game server's own identifier list, not
  * from anything user-controllable.
  */
-
-export function verifyAgentToken(presented: string | null): boolean {
-  const expected = process.env.FIVEM_AGENT_TOKEN;
-  if (!expected || !presented) return false;
-  const a = Buffer.from(presented);
-  const b = Buffer.from(expected);
-  if (a.length !== b.length) return false;
-  return timingSafeEqual(a, b);
-}
 
 export const fivemEventSchema = z.object({
   event: z.enum(["session_start", "session_end"]),
@@ -40,24 +30,28 @@ export type IngestResult =
   | { ok: true; action: "opened" | "closed" | "ignored" }
   | { ok: false; reason: string };
 
+/** Session ids are only unique per agent: prefix them with the server so two servers never collide. */
+const externalId = (serverId: string, sessionId: string) => `${serverId}:${sessionId}`;
+
 /**
- * Record a FiveM session start/end, idempotent on external_session_id.
+ * Record a FiveM session start/end for a server, idempotent on external_session_id.
  * A session_start creates a row in activity_sessions (source='fivem') with 0 seconds;
  * the matching session_end computes real elapsed seconds. Replays are ignored.
  */
-export async function ingestFivemEvent(event: FivemEvent): Promise<IngestResult> {
-  // The member must exist in staff_members to be counted.
-  const member = await db.get("SELECT id FROM staff_members WHERE discord_id = ? AND left_guild_at IS NULL", [event.discordId]);
+export async function ingestFivemEvent(serverId: string, event: FivemEvent): Promise<IngestResult> {
+  // The member must be staff of this server to be counted.
+  const member = await db.get("SELECT id FROM staff_members WHERE server_id = ? AND discord_id = ? AND left_guild_at IS NULL", [serverId, event.discordId]);
   if (!member) return { ok: true, action: "ignored" };
 
   const startedAt = new Date(event.timestamp * 1000).toISOString();
+  const sessionKey = externalId(serverId, event.sessionId);
 
   if (event.event === "session_start") {
     // UNIQUE(external_session_id): a replay inserts nothing.
     const { changes } = await db.run(
-      `INSERT OR IGNORE INTO activity_sessions (discord_id, source, started_at, ended_at, seconds, external_session_id, origin)
-       VALUES (?, 'fivem', ?, NULL, 0, ?, 'fivem_agent')`,
-      [event.discordId, startedAt, event.sessionId]
+      `INSERT OR IGNORE INTO activity_sessions (server_id, discord_id, source, started_at, ended_at, seconds, external_session_id, origin)
+       VALUES (?, ?, 'fivem', ?, NULL, 0, ?, 'fivem_agent')`,
+      [serverId, event.discordId, startedAt, sessionKey]
     );
     return { ok: true, action: changes > 0 ? "opened" : "ignored" };
   }
@@ -65,7 +59,7 @@ export async function ingestFivemEvent(event: FivemEvent): Promise<IngestResult>
   // session_end: find the matching open session (none = replay of a closed session, or an end without a start).
   const open = await db.get<{ id: number; started_at: string }>(
     "SELECT id, started_at FROM activity_sessions WHERE external_session_id = ? AND source = 'fivem' AND ended_at IS NULL",
-    [event.sessionId]
+    [sessionKey]
   );
   if (!open) return { ok: true, action: "ignored" };
 
@@ -76,7 +70,7 @@ export async function ingestFivemEvent(event: FivemEvent): Promise<IngestResult>
 }
 
 /**
- * Close any FiveM sessions still open after a stale timeout.
+ * Close any FiveM sessions (all servers) still open after a stale timeout.
  * Called by the periodic maintenance, protects against missed playerDropped events (server crash, etc.).
  */
 export async function closeStaleFivemSessions(maxSeconds: number): Promise<number> {
@@ -98,7 +92,9 @@ export async function closeStaleFivemSessions(maxSeconds: number): Promise<numbe
   return rows.length;
 }
 
-/** True if the member currently has an open FiveM session. */
-export async function isInFivemNow(discordId: string): Promise<boolean> {
-  return Boolean(await db.get("SELECT 1 AS x FROM activity_sessions WHERE discord_id = ? AND source = 'fivem' AND ended_at IS NULL", [discordId]));
+/** True if the member currently has an open FiveM session on the server. */
+export async function isInFivemNow(serverId: string, discordId: string): Promise<boolean> {
+  return Boolean(
+    await db.get("SELECT 1 AS x FROM activity_sessions WHERE server_id = ? AND discord_id = ? AND source = 'fivem' AND ended_at IS NULL", [serverId, discordId])
+  );
 }

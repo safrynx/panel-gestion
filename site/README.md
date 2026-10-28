@@ -1,6 +1,12 @@
-# GTASUN Staff Manager — site
+# Dashboard FiveM — site
 
-Panel privé de gestion du staff : connexion Discord, rôles/grades, temps vocal Discord, temps FiveM, pastilles, notes et historique des grades.
+Panel multi-serveurs : connexion Discord, rôles/grades, temps vocal Discord, temps FiveM, pastilles, notes et historique des grades — pour chaque serveur enregistré.
+
+## Serveurs
+- Page d'accueil `/` : liste des serveurs accessibles ; les administrateurs de la plateforme (`PANEL_OWNER_IDS`) y **ajoutent un serveur** (nom + ID du serveur Discord). Le créateur en devient propriétaire.
+- Chaque serveur vit sous `/s/<id>` (`/s/<id>/staff`, `/report`, `/logs`, `/admin`), ses API sous `/api/s/<id>/…`.
+- Dans « Accès & rôles » d'un serveur : nom, serveur Discord, fuseau horaire et heure du bilan IA, propriétaires, **token de l'agent FiveM** (affiché une seule fois, seul son hash est stocké), lien d'invitation du bot.
+- Mise à jour depuis la version mono-serveur : automatique, les données existantes deviennent le serveur `default` (voir le README racine).
 
 ## Prérequis
 - Node.js 20+
@@ -18,14 +24,14 @@ Sans lui le site fonctionne, mais sans synchronisation des membres ni suivi du v
 
 ## Configuration Discord
 - **Redirect URI** du portail développeur = `DISCORD_REDIRECT_URI` (ex. `http://localhost:3000/api/auth/discord/callback`).
-- Le login demande les scopes `identify guilds.members.read` (nécessaire pour lire les rôles du membre).
-- `DISCORD_STAFF_ROLE_IDS` : rôles qui donnent accès au panel.
+- Le login demande les scopes `identify guilds` : la liste des serveurs Discord de l'utilisateur, puis le bot lit ses rôles sur les serveurs enregistrés dont il est membre.
+- `DISCORD_STAFF_ROLE_IDS` et `GRADE_ROLE_MAPPING_JSON` ne concernent que le serveur `default` (héritage) ; les autres se configurent dans leur page « Accès & rôles ».
 - `GRADE_ROLE_MAPPING_JSON` : `{"Helper":{"roleId":"123","level":1},"Moderator":{"roleId":"456","level":2}}`.
   Sans mapping, personne ne peut changer de grade et les nouveaux membres sont mis en « Helper ».
 - Le rôle du bot doit être **au-dessus** des rôles de grade dans la hiérarchie du serveur.
 
 ## FiveM
-- Définir `FIVEM_AGENT_TOKEN` côté panel, et dans `server.cfg` : `set gtasun_staff_api_url "https://…/api/fivem"` et `set gtasun_staff_api_token "<même token>"`.
+- Générer le token du serveur dans « Accès & rôles » > Agent FiveM : le panel affiche les lignes à coller dans `server.cfg` (`gtasun_staff_api_url` et `gtasun_staff_api_token`). L'ancien `FIVEM_AGENT_TOKEN` partagé reste valable pour le serveur `default`.
 - Installer la ressource `fivem/gtasun_staff_agent` (`ensure gtasun_staff_agent`).
 
 ## Accès au panel
@@ -46,9 +52,9 @@ Renseigner `FIVEM_DB_URL` (+ `FIVEM_DB_TABLE`, `FIVEM_DB_DISCORD_COLUMN`, `FIVEM
 - Grades et avertissements : uniquement sur un membre de niveau strictement inférieur au sien, vers un niveau strictement inférieur au sien, jamais sur soi-même. Les propriétaires ne sont pas limités par le niveau (mais pas sur eux-mêmes). Le rôle Discord est modifié d'abord ; en cas d'échec Discord, rien n'est changé dans le panel.
 
 ## Structure
-- `src/app` : pages (`/`, `/staff`, `/staff/[discordId]`, `/login`) et API (`/api/auth/*`, `/api/staff`, `/api/admin`, `/api/sync`, `/api/fivem`, `/api/health`)
-- `src/lib` : config, auth/session, SQLite + migrations, sync, voix, FiveM
-- `src/app/api/bot/*` : API réservée au bot (`sync`, `member`, `voice`, `heartbeat`, `tick`, `shutdown`), authentifiée par `BOT_API_TOKEN`
+- `src/app` : `/` (serveurs), `/login`, `/s/[serverId]/…` (pages d'un serveur) ; API `/api/auth/*`, `/api/servers`, `/api/s/[serverId]/*` (`staff`, `admin`, `access`, `recruit`, `report`, `review`, `reset`, `sync`), `/api/fivem`, `/api/health`
+- `src/lib` : `servers` (serveurs, propriétaires, tokens FiveM), config par serveur, auth/session, base + migrations, sync, voix, FiveM
+- `src/app/api/bot/*` : API réservée au bot (`servers`, `sync`, `member`, `voice`, `heartbeat`, `playtime`, `tick`, `shutdown`), authentifiée par `BOT_API_TOKEN`
 - `../fivem/gtasun_staff_agent` : ressource FiveM (à installer sur le serveur FiveM)
 
 ## Vérifications

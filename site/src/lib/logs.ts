@@ -8,7 +8,8 @@ export const LOG_GROUPS: Record<string, { label: string; actions: string[] }> = 
   warnings: { label: "Avertissements", actions: ["warn_add", "warn_remove"] },
   follow: { label: "Commentaires & pastilles", actions: ["note_create", "badge_create", "badge_resolve"] },
   access: { label: "Accès & rôles", actions: ["access_add", "access_remove", "access_permissions", "grade_role_add", "grade_role_remove", "warn_role_set"] },
-  sync: { label: "Synchro, IA & reset", actions: ["staff_sync", "review_generate", "counters_reset"] }
+  sync: { label: "Synchro, IA & reset", actions: ["staff_sync", "review_generate", "counters_reset"] },
+  server: { label: "Serveur", actions: ["server_create", "server_update", "owner_add", "owner_remove", "fivem_token_rotate"] }
 };
 
 const ACTION_LABELS: Record<string, { label: string; tone: LogTone }> = {
@@ -30,7 +31,12 @@ const ACTION_LABELS: Record<string, { label: string; tone: LogTone }> = {
   grade_role_remove: { label: "Rôle de grade −", tone: "info" },
   warn_role_set: { label: "Rôle d'avert", tone: "info" },
   staff_sync: { label: "Synchro Discord", tone: "neutral" },
-  review_generate: { label: "Bilan IA", tone: "info" }
+  review_generate: { label: "Bilan IA", tone: "info" },
+  server_create: { label: "Serveur créé", tone: "up" },
+  server_update: { label: "Serveur modifié", tone: "info" },
+  owner_add: { label: "Propriétaire +", tone: "info" },
+  owner_remove: { label: "Propriétaire −", tone: "danger" },
+  fivem_token_rotate: { label: "Token FiveM", tone: "warn" }
 };
 
 export function actionMeta(action: string): { label: string; tone: LogTone; failed: boolean } {
@@ -71,6 +77,14 @@ function describe(action: string, d: Record<string, unknown>): string {
       return "Temps vocal et temps de jeu remis à zéro (historique conservé)";
     case "review_generate":
       return `Semaine du ${d.week ?? "?"} : ${d.generated ?? 0} résumé(s), ${d.skipped ?? 0} déjà fait(s), ${d.failed ?? 0} échec(s)`;
+    case "server_create":
+    case "server_update":
+      return Object.entries(d).map(([k, v]) => `${k} : ${v ?? "—"}`).join(" · ");
+    case "owner_add":
+    case "owner_remove":
+      return String(d.label ?? d.discordId ?? "");
+    case "fivem_token_rotate":
+      return "Nouveau token de l'agent FiveM (l'ancien ne marche plus)";
     case "staff_sync":
       return `${d.total ?? 0} membres · +${d.inserted ?? 0} / ~${d.updated ?? 0} / −${d.markedLeft ?? 0}`;
     default:
@@ -91,9 +105,9 @@ export type LogRow = {
   details: string;
 };
 
-export async function listLogs(opts: { group?: string; q?: string; limit?: number; offset?: number }): Promise<{ rows: LogRow[]; total: number }> {
-  const where: string[] = [];
-  const params: Record<string, unknown> = {};
+export async function listLogs(serverId: string, opts: { group?: string; q?: string; limit?: number; offset?: number }): Promise<{ rows: LogRow[]; total: number }> {
+  const where: string[] = ["a.server_id = @server"];
+  const params: Record<string, unknown> = { server: serverId };
   const group = opts.group ? LOG_GROUPS[opts.group] : undefined;
   if (opts.group === "failed") where.push("a.action LIKE '%\\_failed' ESCAPE '\\'");
   else if (group) {
@@ -108,10 +122,10 @@ export async function listLogs(opts: { group?: string; q?: string; limit?: numbe
     );
     params.q = `%${opts.q.trim().toLowerCase()}%`;
   }
-  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const clause = `WHERE ${where.join(" AND ")}`;
   const from = `FROM audit_log a
-    LEFT JOIN staff_members sa ON sa.discord_id = a.actor_discord_id
-    LEFT JOIN staff_members st ON st.discord_id = a.target_discord_id ${clause}`;
+    LEFT JOIN staff_members sa ON sa.server_id = a.server_id AND sa.discord_id = a.actor_discord_id
+    LEFT JOIN staff_members st ON st.server_id = a.server_id AND st.discord_id = a.target_discord_id ${clause}`;
 
   const [countRow, rows] = await Promise.all([
     db.get<{ n: number }>(`SELECT COUNT(*) AS n ${from}`, params as never),

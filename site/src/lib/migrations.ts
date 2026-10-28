@@ -3,7 +3,8 @@ import type { Client } from "@libsql/client";
 /**
  * Retro-compatible schema migrations for the GTASUN staff manager.
  * Each migration runs once, tracked in a `schema_migrations` table.
- * Never drop or rename existing columns — additive changes only.
+ * Never drop or rename existing columns. When a constraint must change, rebuild the table
+ * (create _v2, copy every row, drop, rename) inside the same migration so it stays atomic.
  */
 const migrations: { name: string; sql: string }[] = [
   {
@@ -214,8 +215,152 @@ const migrations: { name: string; sql: string }[] = [
         updated_at TEXT NOT NULL
       );
     `
+  },
+  {
+    // Multi-server: every row belongs to a server (one Discord guild + one FiveM server).
+    // Existing data goes to the "default" server. Tables whose uniqueness must include the server are rebuilt
+    // (SQLite cannot change a constraint in place); the others just gain a column.
+    name: "013_multi_server",
+    sql: `
+      CREATE TABLE IF NOT EXISTS servers (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        guild_id TEXT UNIQUE,
+        timezone TEXT,
+        review_hour INTEGER,
+        fivem_token_hash TEXT UNIQUE,
+        created_by TEXT NOT NULL DEFAULT 'system',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+      INSERT OR IGNORE INTO servers (id, name) VALUES ('default', 'Serveur principal');
+      CREATE TABLE IF NOT EXISTS server_owners (
+        server_id TEXT NOT NULL,
+        discord_id TEXT NOT NULL,
+        added_by TEXT NOT NULL DEFAULT 'system',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (server_id, discord_id)
+      );
+      CREATE TABLE IF NOT EXISTS member_roles (
+        server_id TEXT NOT NULL,
+        discord_id TEXT NOT NULL,
+        roles_json TEXT NOT NULL DEFAULT '[]',
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (server_id, discord_id)
+      );
+
+      ALTER TABLE activity_sessions ADD COLUMN server_id TEXT NOT NULL DEFAULT 'default';
+      ALTER TABLE staff_badges ADD COLUMN server_id TEXT NOT NULL DEFAULT 'default';
+      ALTER TABLE staff_notes ADD COLUMN server_id TEXT NOT NULL DEFAULT 'default';
+      ALTER TABLE grade_history ADD COLUMN server_id TEXT NOT NULL DEFAULT 'default';
+      ALTER TABLE audit_log ADD COLUMN server_id TEXT NOT NULL DEFAULT 'default';
+      ALTER TABLE voice_sessions ADD COLUMN server_id TEXT NOT NULL DEFAULT 'default';
+      ALTER TABLE warnings ADD COLUMN server_id TEXT NOT NULL DEFAULT 'default';
+      ALTER TABLE playtime_snapshots ADD COLUMN server_id TEXT NOT NULL DEFAULT 'default';
+      ALTER TABLE discord_roles ADD COLUMN server_id TEXT NOT NULL DEFAULT 'default';
+      ALTER TABLE grade_roles ADD COLUMN server_id TEXT NOT NULL DEFAULT 'default';
+      CREATE INDEX IF NOT EXISTS idx_activity_server ON activity_sessions(server_id, discord_id, source);
+      CREATE INDEX IF NOT EXISTS idx_badges_server ON staff_badges(server_id, discord_id, status);
+      CREATE INDEX IF NOT EXISTS idx_notes_server ON staff_notes(server_id, discord_id);
+      CREATE INDEX IF NOT EXISTS idx_grade_history_server ON grade_history(server_id, discord_id);
+      CREATE INDEX IF NOT EXISTS idx_audit_server ON audit_log(server_id, id DESC);
+      CREATE INDEX IF NOT EXISTS idx_voice_server_open ON voice_sessions(server_id, discord_id, ended_at);
+      CREATE INDEX IF NOT EXISTS idx_warnings_server ON warnings(server_id, discord_id, removed_at);
+      CREATE INDEX IF NOT EXISTS idx_snapshots_server ON playtime_snapshots(server_id, discord_id, taken_at);
+      CREATE INDEX IF NOT EXISTS idx_discord_roles_server ON discord_roles(server_id);
+      CREATE INDEX IF NOT EXISTS idx_grade_roles_server ON grade_roles(server_id);
+
+      CREATE TABLE staff_members_v2 (
+        id TEXT PRIMARY KEY,
+        server_id TEXT NOT NULL DEFAULT 'default',
+        discord_id TEXT NOT NULL,
+        username TEXT NOT NULL,
+        avatar_url TEXT,
+        grade TEXT NOT NULL DEFAULT 'Helper',
+        grade_level INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        guild_joined_at TEXT,
+        left_guild_at TEXT,
+        roles_json TEXT NOT NULL DEFAULT '[]',
+        last_synced_at TEXT,
+        UNIQUE(server_id, discord_id)
+      );
+      INSERT INTO staff_members_v2 (id, discord_id, username, avatar_url, grade, grade_level, created_at, updated_at, guild_joined_at, left_guild_at, roles_json, last_synced_at)
+        SELECT id, discord_id, username, avatar_url, grade, grade_level, created_at, updated_at, guild_joined_at, left_guild_at, roles_json, last_synced_at FROM staff_members;
+      DROP TABLE staff_members;
+      ALTER TABLE staff_members_v2 RENAME TO staff_members;
+
+      CREATE TABLE panel_access_v2 (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        server_id TEXT NOT NULL DEFAULT 'default',
+        kind TEXT NOT NULL CHECK(kind IN ('user','role')),
+        discord_id TEXT NOT NULL,
+        label TEXT,
+        added_by TEXT NOT NULL DEFAULT 'system',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        permissions TEXT,
+        UNIQUE(server_id, kind, discord_id)
+      );
+      INSERT INTO panel_access_v2 (id, kind, discord_id, label, added_by, created_at, permissions)
+        SELECT id, kind, discord_id, label, added_by, created_at, permissions FROM panel_access;
+      DROP TABLE panel_access;
+      ALTER TABLE panel_access_v2 RENAME TO panel_access;
+
+      CREATE TABLE warn_roles_v2 (
+        server_id TEXT NOT NULL DEFAULT 'default',
+        level INTEGER NOT NULL CHECK(level BETWEEN 1 AND 3),
+        role_id TEXT NOT NULL,
+        PRIMARY KEY (server_id, level)
+      );
+      INSERT INTO warn_roles_v2 (level, role_id) SELECT level, role_id FROM warn_roles;
+      DROP TABLE warn_roles;
+      ALTER TABLE warn_roles_v2 RENAME TO warn_roles;
+
+      CREATE TABLE weekly_reviews_v2 (
+        server_id TEXT NOT NULL DEFAULT 'default',
+        week_start TEXT NOT NULL,
+        discord_id TEXT NOT NULL,
+        rating TEXT NOT NULL CHECK(rating IN ('red','yellow','green','blue')),
+        summary TEXT NOT NULL,
+        comments_count INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (server_id, week_start, discord_id)
+      );
+      INSERT INTO weekly_reviews_v2 (week_start, discord_id, rating, summary, comments_count, created_at)
+        SELECT week_start, discord_id, rating, summary, comments_count, created_at FROM weekly_reviews;
+      DROP TABLE weekly_reviews;
+      ALTER TABLE weekly_reviews_v2 RENAME TO weekly_reviews;
+
+      CREATE TABLE playtime_totals_v2 (
+        server_id TEXT NOT NULL DEFAULT 'default',
+        discord_id TEXT NOT NULL,
+        seconds INTEGER NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (server_id, discord_id)
+      );
+      INSERT INTO playtime_totals_v2 (discord_id, seconds, updated_at) SELECT discord_id, seconds, updated_at FROM playtime_totals;
+      DROP TABLE playtime_totals;
+      ALTER TABLE playtime_totals_v2 RENAME TO playtime_totals;
+
+      UPDATE bot_status SET key = 'default:' || key WHERE key IN ('heartbeat', 'top_role_position', 'counters_reset_at', 'review_done');
+      UPDATE activity_sessions SET external_session_id = 'default:' || external_session_id WHERE external_session_id IS NOT NULL;
+    `
   }
 ];
+
+/**
+ * Attach the legacy single-server install to its guild: DISCORD_GUILD_ID (old setting) becomes the guild of
+ * the "default" server, once, if no other server already claims it. Runs after every migration pass (cheap, idempotent).
+ */
+async function bootstrapLegacyServer(client: Client): Promise<void> {
+  const guildId = process.env.DISCORD_GUILD_ID;
+  if (!guildId) return;
+  await client.execute({
+    sql: `UPDATE servers SET guild_id = ? WHERE id = 'default' AND guild_id IS NULL
+          AND NOT EXISTS (SELECT 1 FROM servers WHERE guild_id = ?)`,
+    args: [guildId, guildId]
+  });
+}
 
 /** Split a migration into single statements (no migration contains a ";" inside a string literal). */
 function statementsOf(sql: string): string[] {
@@ -250,4 +395,5 @@ export async function runMigrations(client: Client): Promise<void> {
       if (check.rows.length === 0) throw error;
     }
   }
+  await bootstrapLegacyServer(client);
 }

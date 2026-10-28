@@ -2,6 +2,7 @@ import { db, stmt } from "./db";
 import { audit } from "./audit";
 import { releaseLock, tryAcquireLock } from "./bot-status";
 import { isRating, RATINGS, type Rating } from "./ratings";
+import { getServer, serverTimeZone } from "./servers";
 import { toSqlUtc, weekKey, weekRange } from "./week";
 
 /**
@@ -72,11 +73,11 @@ async function askAI(username: string, comments: { author: string; body: string 
 
 export type Review = { rating: Rating; summary: string };
 
-/** Reviews of one week, keyed by Discord id. */
-export async function getReviews(key: string): Promise<Map<string, Review>> {
+/** Reviews of one week on a server, keyed by Discord id. */
+export async function getReviews(serverId: string, key: string): Promise<Map<string, Review>> {
   const rows = await db.all<{ discord_id: string; rating: string; summary: string }>(
-    "SELECT discord_id, rating, summary FROM weekly_reviews WHERE week_start = ?",
-    [key]
+    "SELECT discord_id, rating, summary FROM weekly_reviews WHERE server_id = ? AND week_start = ?",
+    [serverId, key]
   );
   return new Map(rows.filter((r) => isRating(r.rating)).map((r) => [r.discord_id, { rating: r.rating as Rating, summary: r.summary }]));
 }
@@ -85,27 +86,28 @@ export type ReviewRun =
   | { ok: true; generated: number; skipped: number; failed: number; remaining: number; errors: string[] }
   | { ok: false; error: "ai_not_configured" | "already_running" };
 
-const LOCK = "review";
+const lockName = (serverId: string) => `review:${serverId}`;
 const LOCK_TTL_MS = 6 * 60_000;
 
 /**
- * Generate the reviews of a week for every active member who received at least one comment.
+ * Generate the reviews of a week for every active member of a server who received at least one comment.
  * Members already reviewed are skipped unless `force`. Each success also replaces the member's
  * previous AI badge with the new pastille.
  *
  * Work is done in bounded batches (`maxMembers` AI calls per run, default 25) so that a run fits in a
  * serverless time limit; `remaining` says how many members are still waiting for the next run.
- * A database lock prevents two server instances from running it at the same time.
+ * A database lock (per server) prevents two instances of the site from running it at the same time.
  */
 export async function generateWeeklyReviews(
+  serverId: string,
   offset = 0,
   opts: { force?: boolean; delayMs?: number; maxMembers?: number; actor?: { discordId: string; username?: string } } = {}
 ): Promise<ReviewRun> {
   if (!aiConfigured()) return { ok: false, error: "ai_not_configured" };
-  if (!(await tryAcquireLock(LOCK, LOCK_TTL_MS))) return { ok: false, error: "already_running" };
+  if (!(await tryAcquireLock(lockName(serverId), LOCK_TTL_MS))) return { ok: false, error: "already_running" };
 
   try {
-    const range = weekRange(offset);
+    const range = weekRange(offset, new Date(), serverTimeZone(await getServer(serverId)));
     const key = weekKey(range);
     const from = toSqlUtc(range.start);
     const to = toSqlUtc(range.end);
@@ -113,18 +115,18 @@ export async function generateWeeklyReviews(
     const [members, comments, done] = await Promise.all([
       db.all<{ discord_id: string; username: string }>(
         `SELECT s.discord_id, s.username FROM staff_members s
-         WHERE s.left_guild_at IS NULL AND EXISTS (
-           SELECT 1 FROM staff_notes n WHERE n.discord_id = s.discord_id AND n.created_at >= ? AND n.created_at <= ?)
+         WHERE s.server_id = ? AND s.left_guild_at IS NULL AND EXISTS (
+           SELECT 1 FROM staff_notes n WHERE n.server_id = s.server_id AND n.discord_id = s.discord_id AND n.created_at >= ? AND n.created_at <= ?)
          ORDER BY s.grade_level DESC, s.username`,
-        [from, to]
+        [serverId, from, to]
       ),
       db.all<{ discord_id: string; body: string; author: string }>(
         `SELECT n.discord_id, n.body, COALESCE(n.author_name, sa.username, n.author_discord_id) AS author
-         FROM staff_notes n LEFT JOIN staff_members sa ON sa.discord_id = n.author_discord_id
-         WHERE n.created_at >= ? AND n.created_at <= ? ORDER BY n.id`,
-        [from, to]
+         FROM staff_notes n LEFT JOIN staff_members sa ON sa.server_id = n.server_id AND sa.discord_id = n.author_discord_id
+         WHERE n.server_id = ? AND n.created_at >= ? AND n.created_at <= ? ORDER BY n.id`,
+        [serverId, from, to]
       ),
-      getReviews(key)
+      getReviews(serverId, key)
     ]);
     const commentsOf = new Map<string, { body: string; author: string }[]>();
     for (const c of comments) commentsOf.set(c.discord_id, [...(commentsOf.get(c.discord_id) ?? []), c]);
@@ -151,15 +153,15 @@ export async function generateWeeklyReviews(
         if (!review) throw new Error("réponse IA illisible");
         await db.batch([
           stmt(
-            `INSERT INTO weekly_reviews (week_start, discord_id, rating, summary, comments_count) VALUES (?, ?, ?, ?, ?)
-             ON CONFLICT(week_start, discord_id) DO UPDATE SET rating = excluded.rating, summary = excluded.summary,
+            `INSERT INTO weekly_reviews (server_id, week_start, discord_id, rating, summary, comments_count) VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(server_id, week_start, discord_id) DO UPDATE SET rating = excluded.rating, summary = excluded.summary,
                comments_count = excluded.comments_count, created_at = CURRENT_TIMESTAMP`,
-            [key, member.discord_id, review.rating, review.summary, list.length]
+            [serverId, key, member.discord_id, review.rating, review.summary, list.length]
           ),
           // One AI pastille at a time: the new week replaces the previous one.
-          stmt("UPDATE staff_badges SET status = 'resolved', resolved_at = CURRENT_TIMESTAMP WHERE discord_id = ? AND status = 'active' AND author_discord_id = 'ia'", [member.discord_id]),
-          stmt("INSERT INTO staff_badges (discord_id, color, reason, author_discord_id) VALUES (?, ?, ?, 'ia')", [
-            member.discord_id, review.rating, `Bilan IA · ${RATINGS[review.rating].label} : ${review.summary}`
+          stmt("UPDATE staff_badges SET status = 'resolved', resolved_at = CURRENT_TIMESTAMP WHERE server_id = ? AND discord_id = ? AND status = 'active' AND author_discord_id = 'ia'", [serverId, member.discord_id]),
+          stmt("INSERT INTO staff_badges (server_id, discord_id, color, reason, author_discord_id) VALUES (?, ?, ?, ?, 'ia')", [
+            serverId, member.discord_id, review.rating, `Bilan IA · ${RATINGS[review.rating].label} : ${review.summary}`
           ])
         ]);
         generated++;
@@ -170,9 +172,9 @@ export async function generateWeeklyReviews(
       if (opts.delayMs !== 0) await sleep(opts.delayMs ?? 2200);
     }
 
-    await audit(opts.actor ?? "ia", "review_generate", null, { week: key, generated, skipped, failed, remaining });
+    await audit(serverId, opts.actor ?? "ia", "review_generate", null, { week: key, generated, skipped, failed, remaining });
     return { ok: true, generated, skipped, failed, remaining, errors };
   } finally {
-    await releaseLock(LOCK);
+    await releaseLock(lockName(serverId));
   }
 }

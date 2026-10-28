@@ -7,7 +7,7 @@ export const dynamic = "force-dynamic";
 /** Variables the site cannot work without (names only: values are never exposed). */
 const REQUIRED = [
   "SESSION_SECRET", "APP_URL", "DISCORD_CLIENT_ID", "DISCORD_CLIENT_SECRET", "DISCORD_REDIRECT_URI",
-  "DISCORD_GUILD_ID", "DISCORD_BOT_TOKEN", "PANEL_OWNER_IDS", "BOT_API_TOKEN"
+  "DISCORD_BOT_TOKEN", "PANEL_OWNER_IDS", "BOT_API_TOKEN"
 ];
 
 /**

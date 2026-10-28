@@ -1,6 +1,6 @@
 /**
- * Weeks run Monday 00:00 to Sunday 24:00 in the community's time zone (APP_TIMEZONE, default Europe/Paris),
- * whatever the server's own zone is: serverless hosts run in UTC.
+ * Weeks run Monday 00:00 to Sunday 24:00 in the community's time zone (passed by the caller from the server's
+ * settings; default APP_TIMEZONE, else Europe/Paris), whatever the host's own zone is: serverless hosts run in UTC.
  */
 
 export type WeekRange = {
@@ -48,8 +48,7 @@ const keyOf = (d: Date) => `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${
 const dayLabel = (d: Date) => `${pad(d.getUTCDate())}/${pad(d.getUTCMonth() + 1)}`;
 
 /** The week `offset` weeks ago (0 = the current week, up to "now"). */
-export function weekRange(offset: number, now = new Date()): WeekRange {
-  const tz = timeZone();
+export function weekRange(offset: number, now = new Date(), tz = timeZone()): WeekRange {
   const p = zonedParts(now, tz);
   const monday = new Date(Date.UTC(p.year, p.month - 1, p.day - p.weekday - offset * 7)); // pure calendar arithmetic
   const nextMonday = new Date(monday.getTime() + 7 * 86_400_000);
@@ -67,8 +66,8 @@ export function weekKey(range: WeekRange): string {
 }
 
 /** True on Sunday, from `hour` o'clock, in the community's zone. */
-export function isSundayFrom(hour: number, now = new Date()): boolean {
-  const p = zonedParts(now);
+export function isSundayFrom(hour: number, now = new Date(), tz = timeZone()): boolean {
+  const p = zonedParts(now, tz);
   return p.weekday === 6 && p.hour >= hour;
 }
 

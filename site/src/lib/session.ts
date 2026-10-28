@@ -7,7 +7,8 @@ export type SessionPayload = {
   discordId: string;
   username: string;
   avatarUrl: string | null;
-  roles: string[];
+  /** Roles of the single-server version; ignored now (roles are resolved per server). */
+  roles?: string[];
   issuedAt: number;
   expiresAt: number;
   nonce: string;

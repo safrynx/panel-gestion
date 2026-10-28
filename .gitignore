@@ -1,0 +1,13 @@
+# Never commit secrets or local data
+_backup/
+.env
+.env.*
+!.env.example
+*.env.bak
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+node_modules
+.next
+.next-verify
+*.tsbuildinfo

@@ -3,6 +3,7 @@ import { getStaffOverview, type StaffOverview } from "./stats";
 import { formatDuration } from "./format";
 import { getReviews, type Review } from "./review";
 import { RATINGS } from "./ratings";
+import { getServer, serverTimeZone } from "./servers";
 import { toSqlUtc, weekKey, weekRange, type WeekRange } from "./week";
 
 export { weekRange, type WeekRange } from "./week";
@@ -16,20 +17,20 @@ export type WeeklyReport = {
   groups: { grade: string; gradeLevel: number; rows: ReportRow[] }[];
 };
 
-export async function buildWeeklyReport(offset: number): Promise<WeeklyReport> {
-  const range = weekRange(offset);
-  const overview = await getStaffOverview(range.start, range.end, false);
+export async function buildWeeklyReport(serverId: string, offset: number): Promise<WeeklyReport> {
+  const range = weekRange(offset, new Date(), serverTimeZone(await getServer(serverId)));
+  const overview = await getStaffOverview(serverId, range.start, range.end, false);
   // warnings.created_at uses SQLite CURRENT_TIMESTAMP ("YYYY-MM-DD HH:MM:SS", UTC).
   const startIso = toSqlUtc(range.start);
   const endIso = toSqlUtc(range.end);
   const [added, removed] = await Promise.all([
-    db.all<{ discord_id: string; n: number }>("SELECT discord_id, COUNT(*) AS n FROM warnings WHERE created_at >= ? AND created_at < ? GROUP BY discord_id", [startIso, endIso]),
-    db.all<{ discord_id: string; n: number }>("SELECT discord_id, COUNT(*) AS n FROM warnings WHERE removed_at >= ? AND removed_at < ? GROUP BY discord_id", [startIso, endIso])
+    db.all<{ discord_id: string; n: number }>("SELECT discord_id, COUNT(*) AS n FROM warnings WHERE server_id = ? AND created_at >= ? AND created_at < ? GROUP BY discord_id", [serverId, startIso, endIso]),
+    db.all<{ discord_id: string; n: number }>("SELECT discord_id, COUNT(*) AS n FROM warnings WHERE server_id = ? AND removed_at >= ? AND removed_at < ? GROUP BY discord_id", [serverId, startIso, endIso])
   ]);
   const addedMap = new Map(added.map((r) => [r.discord_id, r.n]));
   const removedMap = new Map(removed.map((r) => [r.discord_id, r.n]));
 
-  const reviews = await getReviews(weekKey(range));
+  const reviews = await getReviews(serverId, weekKey(range));
   const rows = overview
     .map((m) => ({ ...m, warningsAdded: addedMap.get(m.discordId) ?? 0, warningsRemoved: removedMap.get(m.discordId) ?? 0, review: reviews.get(m.discordId) ?? null }))
     .sort((a, b) => b.gradeLevel - a.gradeLevel || a.username.localeCompare(b.username, "fr", { sensitivity: "base" }));

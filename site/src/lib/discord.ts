@@ -1,4 +1,3 @@
-export { getStaffRoleIds, getGradeMapping, resolveGradeFromRoles } from "./config";
 import { storeGuildRoles } from "./roles";
 
 const DISCORD_API = "https://discord.com/api/v10";
@@ -10,12 +9,6 @@ export type DiscordUser = {
   avatar: string | null;
 };
 
-export type GuildMemberInfo = {
-  nick: string | null;
-  roles: string[];
-  joined_at: string;
-};
-
 export type OAuthTokenResponse = {
   access_token: string;
   token_type: string;
@@ -24,18 +17,16 @@ export type OAuthTokenResponse = {
   scope?: string;
 };
 
-export function getDiscordConfig(): { clientId: string; clientSecret: string; redirectUri: string; guildId: string } | { missing: string[] } {
+export function getDiscordConfig(): { clientId: string; clientSecret: string; redirectUri: string } | { missing: string[] } {
   const missing: string[] = [];
   if (!process.env.DISCORD_CLIENT_ID) missing.push("DISCORD_CLIENT_ID");
   if (!process.env.DISCORD_CLIENT_SECRET) missing.push("DISCORD_CLIENT_SECRET");
   if (!process.env.DISCORD_REDIRECT_URI) missing.push("DISCORD_REDIRECT_URI");
-  if (!process.env.DISCORD_GUILD_ID) missing.push("DISCORD_GUILD_ID");
   if (missing.length) return { missing };
   return {
     clientId: process.env.DISCORD_CLIENT_ID as string,
     clientSecret: process.env.DISCORD_CLIENT_SECRET as string,
-    redirectUri: process.env.DISCORD_REDIRECT_URI as string,
-    guildId: process.env.DISCORD_GUILD_ID as string
+    redirectUri: process.env.DISCORD_REDIRECT_URI as string
   };
 }
 
@@ -47,10 +38,22 @@ export function buildAuthorizeUrl(state: string): string {
     client_id: config.clientId,
     redirect_uri: config.redirectUri,
     response_type: "code",
-    // guilds.members.read is required for /users/@me/guilds/{guild}/member (roles).
-    scope: "identify guilds.members.read",
+    // guilds: one call lists the user's guilds, so login only looks up the registered servers they are actually in.
+    scope: "identify guilds",
     state
   });
+  return `https://discord.com/oauth2/authorize?${params.toString()}`;
+}
+
+/** Link that adds the shared bot to a guild with "Manage Roles" (needed for grades and averts). */
+export function botInviteUrl(guildId?: string | null): string | null {
+  const clientId = process.env.DISCORD_CLIENT_ID;
+  if (!clientId) return null;
+  const params = new URLSearchParams({ client_id: clientId, scope: "bot", permissions: "268435456" });
+  if (guildId) {
+    params.set("guild_id", guildId);
+    params.set("disable_guild_select", "true");
+  }
   return `https://discord.com/oauth2/authorize?${params.toString()}`;
 }
 
@@ -80,13 +83,11 @@ export async function fetchDiscordUser(accessToken: string): Promise<DiscordUser
   return (await res.json()) as DiscordUser;
 }
 
-export async function fetchGuildMember(accessToken: string, guildId: string): Promise<GuildMemberInfo | null> {
-  const res = await fetch(`${DISCORD_API}/users/@me/guilds/${guildId}/member`, {
-    headers: { Authorization: `Bearer ${accessToken}` }
-  });
-  if (res.status === 404) return null; // not in guild
+/** IDs of the guilds the user is in (OAuth `guilds` scope), or null on failure. */
+export async function fetchUserGuildIds(accessToken: string): Promise<string[] | null> {
+  const res = await fetch(`${DISCORD_API}/users/@me/guilds?limit=200`, { headers: { Authorization: `Bearer ${accessToken}` } });
   if (!res.ok) return null;
-  return (await res.json()) as GuildMemberInfo;
+  return ((await res.json()) as { id: string }[]).map((g) => g.id);
 }
 
 export function avatarUrl(user: DiscordUser): string | null {
@@ -95,18 +96,20 @@ export function avatarUrl(user: DiscordUser): string | null {
   return `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.${ext}`;
 }
 
+const botToken = () => process.env.DISCORD_BOT_TOKEN;
+
 /**
  * Add and remove roles on a guild member with the bot token (server-side only).
  * The bot role must sit above every role it touches in the guild hierarchy.
  */
 export async function changeMemberRoles(
+  guildId: string | null,
   discordId: string,
   add: string[],
   remove: string[],
   reason: string
 ): Promise<{ ok: true } | { ok: false; status: number }> {
-  const token = process.env.DISCORD_BOT_TOKEN;
-  const guildId = process.env.DISCORD_GUILD_ID;
+  const token = botToken();
   if (!token || !guildId) return { ok: false, status: 0 };
   const headers = {
     Authorization: `Bot ${token}`,
@@ -125,15 +128,14 @@ export async function changeMemberRoles(
   return { ok: true };
 }
 
-/** Refresh the cached list of guild roles (names + positions) from Discord. Returns the count, or null on failure. */
-export async function refreshGuildRoles(): Promise<number | null> {
-  const token = process.env.DISCORD_BOT_TOKEN;
-  const guildId = process.env.DISCORD_GUILD_ID;
+/** Refresh a server's cached list of guild roles (names + positions) from Discord. Returns the count, or null on failure. */
+export async function refreshGuildRoles(serverId: string, guildId: string | null): Promise<number | null> {
+  const token = botToken();
   if (!token || !guildId) return null;
   const res = await fetch(`${DISCORD_API}/guilds/${guildId}/roles`, { headers: { Authorization: `Bot ${token}` } });
   if (!res.ok) return null;
   const roles = (await res.json()) as { id: string; name: string; position: number; color: number }[];
-  await storeGuildRoles(roles.filter((r) => r.id !== guildId)); // @everyone has the guild id
+  await storeGuildRoles(serverId, roles.filter((r) => r.id !== guildId)); // @everyone has the guild id
   return roles.length;
 }
 
@@ -145,9 +147,8 @@ export type GuildMemberFull = {
 };
 
 /** Search guild members by name prefix (bot token, server-side). Null when the bot is not usable. */
-export async function searchGuildMembers(query: string): Promise<GuildMemberFull[] | null> {
-  const token = process.env.DISCORD_BOT_TOKEN;
-  const guildId = process.env.DISCORD_GUILD_ID;
+export async function searchGuildMembers(guildId: string | null, query: string): Promise<GuildMemberFull[] | null> {
+  const token = botToken();
   if (!token || !guildId) return null;
   const res = await fetch(`${DISCORD_API}/guilds/${guildId}/members/search?query=${encodeURIComponent(query)}&limit=10`, {
     headers: { Authorization: `Bot ${token}` }
@@ -157,11 +158,44 @@ export async function searchGuildMembers(query: string): Promise<GuildMemberFull
 }
 
 /** One guild member by ID through the bot, or null when absent / bot unusable. */
-export async function fetchGuildMemberByBot(discordId: string): Promise<GuildMemberFull | null> {
-  const token = process.env.DISCORD_BOT_TOKEN;
-  const guildId = process.env.DISCORD_GUILD_ID;
+export async function fetchGuildMemberByBot(guildId: string | null, discordId: string): Promise<GuildMemberFull | null> {
+  const token = botToken();
   if (!token || !guildId) return null;
   const res = await fetch(`${DISCORD_API}/guilds/${guildId}/members/${discordId}`, { headers: { Authorization: `Bot ${token}` } });
   if (!res.ok) return null;
   return (await res.json()) as GuildMemberFull;
+}
+
+type PartialGuildMember = {
+  user?: { id: string; username: string; global_name?: string | null; avatar: string | null; bot?: boolean };
+  roles: string[];
+  joined_at?: string;
+};
+
+/** Every (non-bot) member of a guild, paged 1000 at a time. Null when the bot cannot read the guild. */
+export async function fetchAllGuildMembers(guildId: string | null) {
+  const token = botToken();
+  if (!token || !guildId) return null;
+  const members: { discordId: string; username: string; avatarUrl: string | null; roleIds: string[]; joinedAt: string | null; presentInGuild: boolean }[] = [];
+  let after = "0";
+  for (let page = 0; page < 50; page++) {
+    const res = await fetch(`${DISCORD_API}/guilds/${guildId}/members?limit=1000&after=${after}`, { headers: { Authorization: `Bot ${token}` } });
+    if (!res.ok) return null;
+    const batch = (await res.json()) as PartialGuildMember[];
+    if (!batch.length) break;
+    for (const m of batch) {
+      if (!m.user || m.user.bot) continue;
+      members.push({
+        discordId: m.user.id,
+        username: m.user.global_name || m.user.username,
+        avatarUrl: avatarUrl(m.user),
+        roleIds: m.roles ?? [],
+        joinedAt: m.joined_at ?? null,
+        presentInGuild: true
+      });
+    }
+    after = batch[batch.length - 1].user!.id;
+    if (batch.length < 1000) break;
+  }
+  return members;
 }

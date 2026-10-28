@@ -1,9 +1,16 @@
 import { db } from "./db";
 
+/**
+ * Small key/value store (table bot_status). Server-specific values are stored under `<serverId>:<key>`;
+ * locks under `lock:<name>`.
+ */
+
 /** The bot reports every 60 s; three missed beats and it is considered offline. */
 const HEARTBEAT_MAX_AGE_MS = 180_000;
 
-export async function setBotStatus(key: string, value: string): Promise<void> {
+const serverKey = (serverId: string, key: string) => `${serverId}:${key}`;
+
+export async function setStatusValue(key: string, value: string): Promise<void> {
   await db.run(
     `INSERT INTO bot_status (key, value, updated_at) VALUES (?, ?, ?)
      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
@@ -11,26 +18,39 @@ export async function setBotStatus(key: string, value: string): Promise<void> {
   );
 }
 
-export async function clearBotHeartbeat(): Promise<void> {
-  await db.run("DELETE FROM bot_status WHERE key = 'heartbeat'");
-}
-
 export async function getStatusValue(key: string): Promise<string | null> {
   const row = await db.get<{ value: string }>("SELECT value FROM bot_status WHERE key = ?", [key]);
   return row?.value ?? null;
 }
 
+export function setServerStatus(serverId: string, key: string, value: string): Promise<void> {
+  return setStatusValue(serverKey(serverId, key), value);
+}
+
+export function getServerStatus(serverId: string, key: string): Promise<string | null> {
+  return getStatusValue(serverKey(serverId, key));
+}
+
+/** Forget the bot heartbeat of one server, or of every server (bot shutting down). */
+export async function clearBotHeartbeat(serverId?: string): Promise<void> {
+  if (serverId) await db.run("DELETE FROM bot_status WHERE key = ?", [serverKey(serverId, "heartbeat")]);
+  else await db.run("DELETE FROM bot_status WHERE key LIKE '%:heartbeat'");
+}
+
 export type BotStatus = {
-  /** True when the bot sent a heartbeat recently. */
+  /** True when the bot sent a heartbeat for this server's guild recently (it is running AND it is in the guild). */
   alive: boolean;
   heartbeatAt: string | null;
-  /** Position of the bot's highest role: it can only manage roles below this position. */
+  /** Position of the bot's highest role in the guild: it can only manage roles below this position. */
   topRolePosition: number | null;
 };
 
-export async function getBotStatus(): Promise<BotStatus> {
-  const rows = await db.all<{ key: string; value: string }>("SELECT key, value FROM bot_status WHERE key IN ('heartbeat', 'top_role_position')");
-  const map = new Map(rows.map((r) => [r.key, r.value]));
+export async function getBotStatus(serverId: string): Promise<BotStatus> {
+  const rows = await db.all<{ key: string; value: string }>("SELECT key, value FROM bot_status WHERE key IN (?, ?)", [
+    serverKey(serverId, "heartbeat"),
+    serverKey(serverId, "top_role_position")
+  ]);
+  const map = new Map(rows.map((r) => [r.key.slice(serverId.length + 1), r.value]));
   const heartbeatAt = map.get("heartbeat") ?? null;
   const top = map.get("top_role_position");
   return {

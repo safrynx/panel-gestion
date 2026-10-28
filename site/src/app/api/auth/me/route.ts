@@ -1,15 +1,18 @@
 import { NextResponse } from "next/server";
-import { getSessionUser, isStaffUser, getActorLevel } from "@/lib/auth";
+import { getIdentity, listAccessibleServers } from "@/lib/auth";
+import { isPlatformOwner } from "@/lib/config";
 
 export const runtime = "nodejs";
 
+/** GET /api/auth/me — who is logged in and which servers they can open. */
 export async function GET() {
-  const user = await getSessionUser();
-  if (!user) return NextResponse.json({ authenticated: false });
+  const identity = await getIdentity();
+  if (!identity) return NextResponse.json({ authenticated: false });
+  const servers = await listAccessibleServers(identity);
   return NextResponse.json({
     authenticated: true,
-    staff: await isStaffUser(user),
-    managerLevel: await getActorLevel(user),
-    user: { ...user, roles: undefined }
+    user: identity,
+    platformOwner: isPlatformOwner(identity.discordId),
+    servers: servers.map((s) => ({ id: s.id, name: s.name }))
   });
 }

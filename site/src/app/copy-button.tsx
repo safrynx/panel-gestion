@@ -9,7 +9,7 @@ export default function CopyButton({ text, label }: { text: string; label: strin
       onClick={async () => {
         try {
           await navigator.clipboard.writeText(text);
-          toast("Bilan copié dans le presse-papiers", "ok");
+          toast("Copié dans le presse-papiers", "ok");
         } catch {
           toast("Copie impossible ici : utilise le téléchargement CSV", "error");
         }

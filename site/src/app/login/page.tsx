@@ -1,5 +1,5 @@
 import { redirect } from "next/navigation";
-import { getSessionUser, isStaffUser } from "@/lib/auth";
+import { getIdentity } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -8,15 +8,14 @@ const messages: Record<string, string> = {
   invalid_state: "Session de connexion expirée ou invalide. Réessaie.",
   oauth_exchange: "Discord a refusé l'échange du code. Vérifie le client secret et l'URL de redirection.",
   oauth_identity: "Impossible de lire ton profil Discord.",
-  not_in_guild: "Tu n'es pas membre du serveur GTASUN.",
-  forbidden: "Ton compte n'a pas accès au panel. Demande à un propriétaire de t'ajouter.",
+  forbidden: "Ton compte n'a accès à aucun serveur. Demande au propriétaire d'un serveur de t'ajouter.",
   access_denied: "Connexion annulée."
 };
 
 export default async function LoginPage({ searchParams }: { searchParams: Promise<{ error?: string; missing?: string }> }) {
-  const user = await getSessionUser();
+  const identity = await getIdentity();
   const { error, missing } = await searchParams;
-  if (user && (await isStaffUser(user)) && !error) redirect("/");
+  if (identity && !error) redirect("/");
 
   return (
     <main className="login">
@@ -26,7 +25,7 @@ export default async function LoginPage({ searchParams }: { searchParams: Promis
         <img className="login-logo rise" src="/logo.png" alt="GTASUN" />
         <div className="eyebrow rise rise-1" style={{ marginTop: 34 }}>Espace staff</div>
         <h1 className="h1 rise rise-2">GTASUN</h1>
-        <p className="muted rise rise-3" style={{ margin: "12px 0 0" }}>Gestion du staff, des grades et de l&apos;activité.</p>
+        <p className="muted rise rise-3" style={{ margin: "12px 0 0" }}>Dashboard de gestion de tes serveurs FiveM : staff, grades et activité.</p>
         {error && (
           <div className="error rise" style={{ marginTop: 22, textAlign: "left" }}>
             {messages[error] ?? "Erreur de connexion."}

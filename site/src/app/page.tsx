@@ -1,90 +1,63 @@
 import Link from "next/link";
-import { can, requireStaffPage } from "@/lib/auth";
-import { getStaffOverview } from "@/lib/stats";
-import { listLogs } from "@/lib/logs";
-import { getCountersResetAt } from "@/lib/counters";
-import { formatDateTime } from "@/lib/format";
-import Shell, { PageHead } from "./shell";
-import Avatar from "./avatar";
-import BotBanner from "./bot-banner";
-import CountUp from "./count-up";
-import SyncButton from "./sync-button";
+import { listAccessibleServers, requireIdentityPage } from "@/lib/auth";
+import { getBotStatus } from "@/lib/bot-status";
+import { isPlatformOwner } from "@/lib/config";
+import { db } from "@/lib/db";
+import { Frame, PageHead } from "./shell";
+import NewServerForm from "./new-server-form";
 
 export const dynamic = "force-dynamic";
 
-export default async function DashboardPage() {
-  const user = await requireStaffPage();
-  const staff = await getStaffOverview(new Date(Date.now() - 7 * 86400_000));
-  const voice = staff.reduce((sum, m) => sum + m.voiceSeconds, 0);
-  const fivem = staff.reduce((sum, m) => sum + m.fivemSeconds, 0);
-  const inVoice = staff.filter((m) => m.inVoice).length;
-  const warned = staff.filter((m) => m.warnLevel > 0).length;
-  const resetAt = await getCountersResetAt();
-  const logs = can(user, "view_logs") ? (await listLogs({ limit: 7 })).rows : null;
+/** Home: the servers the user can open. Platform owners also register new ones here. */
+export default async function ServersPage({ searchParams }: { searchParams: Promise<{ error?: string }> }) {
+  const identity = await requireIdentityPage();
+  const { error } = await searchParams;
+  const servers = await listAccessibleServers(identity);
+  const platformOwner = isPlatformOwner(identity.discordId);
 
-  const stats = [
-    { label: "Staff actif", value: staff.length, kind: "int" as const, hint: `${inVoice} en vocal maintenant` },
-    { label: "Vocal · 7 jours", value: voice, kind: "duration" as const, hint: "cumulé" },
-    { label: "Jeu · 7 jours", value: fivem, kind: "duration" as const, hint: "cumulé" },
-    { label: "Avertis", value: warned, kind: "int" as const, hint: "au moins un avert" }
-  ];
+  const [counts, bots] = await Promise.all([
+    db.all<{ server_id: string; n: number }>("SELECT server_id, COUNT(*) AS n FROM staff_members WHERE left_guild_at IS NULL GROUP BY server_id"),
+    Promise.all(servers.map((s) => getBotStatus(s.id)))
+  ]);
+  const staffCount = new Map(counts.map((c) => [c.server_id, c.n]));
 
   return (
-    <Shell user={user} active="dashboard">
-      <BotBanner />
-      <PageHead kicker="Vue d'ensemble" title={`Salut ${user.username}`} actions={<>{can(user, "sync") && <SyncButton />}<Link href="/staff" className="btn primary">Ouvrir le staff</Link></>}>
-        L&apos;état de l&apos;équipe sur les 7 derniers jours.{resetAt && resetAt.getTime() > Date.now() - 7 * 86400_000 && <> Compteurs remis à zéro le {formatDateTime(resetAt.toISOString())}.</>}
+    <Frame
+      identity={identity}
+      brandHref="/"
+      title="Mes serveurs"
+      nav={<Link href="/" data-active><i>01</i>Serveurs</Link>}
+      topLinks={<Link href="/" data-active>Serveurs</Link>}
+    >
+      <PageHead kicker="Dashboard FiveM" title="Serveurs">
+        {servers.length ? "Choisis le serveur à gérer." : platformOwner ? "Aucun serveur pour l'instant : ajoute le premier ci-dessous." : "Tu n'as accès à aucun serveur."}
       </PageHead>
+      {error === "forbidden" && <div className="banner">Tu n&apos;as pas accès à ce serveur.</div>}
 
-      <div className="strip">
-        {stats.map((s, i) => (
-          <div key={s.label} className={`rise rise-${i + 1}`}>
-            <div className="eyebrow">{s.label}</div>
-            <div className="num"><CountUp value={s.value} kind={s.kind} /></div>
-            <small>{s.hint}</small>
-          </div>
+      <div style={{ display: "grid", gap: 14, gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))" }}>
+        {servers.map((s, i) => (
+          <Link key={s.id} href={`/s/${s.id}`} className={`rise rise-${Math.min(i + 1, 4)}`} style={{ display: "block", padding: 20, border: "1px solid var(--line-2)", borderRadius: 14 }}>
+            <div className="eyebrow">{s.id}</div>
+            <div className="h2" style={{ marginTop: 6 }}>{s.name}</div>
+            <div className="muted" style={{ marginTop: 10, fontSize: 13, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+              <span>{staffCount.get(s.id) ?? 0} staff</span>
+              <span className={`dot ${bots[i].alive ? "on" : ""}`} />
+              <span>{!s.guildId ? "Discord non lié" : bots[i].alive ? "Bot connecté" : "Bot absent"}</span>
+              {s.hasFivemToken && <span>· FiveM lié</span>}
+            </div>
+          </Link>
         ))}
       </div>
 
-      <div className={`cols ${logs ? "two" : ""}`}>
-        <section className="rise rise-2">
-          <header className="sect" style={{ margin: 0, display: "flex", justifyContent: "space-between", alignItems: "baseline", paddingBottom: 12, borderBottom: "1px solid var(--line-2)" }}>
-            <h2 className="h2">Équipe</h2><Link href="/staff" className="linkish">Tout voir</Link>
+      {platformOwner && (
+        <section className="rise rise-2" style={{ marginTop: 48, maxWidth: 560 }}>
+          <header style={{ paddingBottom: 12, borderBottom: "1px solid var(--line-2)" }}>
+            <h2 className="h2">Ajouter un serveur</h2>
+            <p className="muted" style={{ margin: "6px 0 0" }}>Tu en deviens propriétaire. Ensuite : invite le bot sur le serveur Discord, puis génère le token de l&apos;agent FiveM dans « Accès &amp; rôles ».</p>
           </header>
-          {staff.length === 0 && <p className="muted" style={{ marginTop: 18 }}>Aucun membre staff en base. Clique sur « Synchroniser Discord » ou lance le bot.</p>}
-          {staff.slice(0, 8).map((m, i) => (
-            <Link key={m.id} href={`/staff/${m.discordId}`} className="row-in" style={{ ["--i" as string]: i, display: "flex", alignItems: "center", gap: 14, padding: "12px 0", borderBottom: "1px solid var(--line)" }}>
-              <Avatar url={m.avatarUrl} name={m.username} size={34} />
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.username}</div>
-                <div className="muted" style={{ fontSize: 12 }}>{m.grade}</div>
-              </div>
-              <span className="pips" data-level={m.warnLevel}><i /><i /><i /></span>
-              <span className={`dot ${m.inVoice ? "on" : ""}`} title={m.inVoice ? "En vocal" : "Hors vocal"} />
-            </Link>
-          ))}
+          <NewServerForm />
         </section>
-
-        {logs && (
-          <section className="rise rise-3">
-            <header style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", paddingBottom: 12, borderBottom: "1px solid var(--line-2)" }}>
-              <h2 className="h2">Dernières actions</h2><Link href="/logs" className="linkish">Tous les logs</Link>
-            </header>
-            {logs.length === 0 && <p className="muted" style={{ marginTop: 18 }}>Rien pour l&apos;instant.</p>}
-            {logs.map((l, i) => (
-              <div key={l.id} className="row-in" style={{ ["--i" as string]: i, padding: "12px 0", borderBottom: "1px solid var(--line)" }}>
-                <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                  <span className="tag" data-tone={l.tone}>{l.label}</span>
-                  <span style={{ fontWeight: 600 }}>{l.actorName}</span>
-                  {l.targetName && <span className="muted">→ {l.targetName}</span>}
-                </div>
-                {l.details && <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>{l.details}</div>}
-                <div className="muted" style={{ fontSize: 11, marginTop: 2 }}>{formatDateTime(l.createdAt)}</div>
-              </div>
-            ))}
-          </section>
-        )}
-      </div>
-    </Shell>
+      )}
+    </Frame>
   );
 }

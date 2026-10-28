@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { avatarUrl, exchangeCode, fetchDiscordUser, fetchGuildMember, getDiscordConfig } from "@/lib/discord";
-import { hasPanelAccess } from "@/lib/config";
+import { avatarUrl, exchangeCode, fetchDiscordUser, fetchUserGuildIds, getDiscordConfig } from "@/lib/discord";
+import { listAccessibleServers } from "@/lib/auth";
+import { isPlatformOwner } from "@/lib/config";
+import { refreshMemberships } from "@/lib/memberships";
 import { encodeSession, sessionCookieName, SESSION_MAX_AGE, verifyAndConsumeState } from "@/lib/session";
-import { upsertStaffMember } from "@/lib/sync";
 
 export const runtime = "nodejs";
 
@@ -31,26 +32,18 @@ export async function GET(req: NextRequest) {
 
   const user = await fetchDiscordUser(token.access_token);
   if (!user) return fail("oauth_identity");
+  const guildIds = await fetchUserGuildIds(token.access_token);
+  if (!guildIds) return fail("oauth_identity");
 
-  const member = await fetchGuildMember(token.access_token, config.guildId);
-  if (!member) return fail("not_in_guild");
+  const identity = { discordId: user.id, username: user.global_name || user.username, avatarUrl: avatarUrl(user) };
+  // Fresh roles on every registered server the user is in, before deciding where they may go.
+  await refreshMemberships(identity, guildIds);
+  const servers = await listAccessibleServers(identity);
+  if (!servers.length && !isPlatformOwner(identity.discordId)) return fail("forbidden");
 
-  if (!(await hasPanelAccess(user.id, member.roles))) return fail("forbidden");
-
-  const username = user.global_name || user.username;
-  const avatar = avatarUrl(user);
-  // Make sure the member exists in the DB right away with fresh roles/grade.
-  await upsertStaffMember({
-    discordId: user.id,
-    username,
-    avatarUrl: avatar,
-    roleIds: member.roles,
-    joinedAt: member.joined_at ?? null,
-    presentInGuild: true
-  });
-
-  const res = NextResponse.redirect(`${appUrl()}/`);
-  res.cookies.set(sessionCookieName, encodeSession({ discordId: user.id, username, avatarUrl: avatar, roles: member.roles }), {
+  // One server: straight to it. Several (or a platform owner): the server list.
+  const res = NextResponse.redirect(`${appUrl()}${servers.length === 1 ? `/s/${servers[0].id}` : "/"}`);
+  res.cookies.set(sessionCookieName, encodeSession(identity), {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
     sameSite: "lax",

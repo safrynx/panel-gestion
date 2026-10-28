@@ -1,5 +1,6 @@
 "use client";
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
+import { useParams } from "next/navigation";
 
 type AskInput = { label: string; placeholder?: string; required?: boolean; multiline?: boolean; initial?: string };
 export type AskOptions = { title: string; message?: string; confirmLabel?: string; danger?: boolean; input?: AskInput };
@@ -99,7 +100,17 @@ export function UIProvider({ children }: { children: React.ReactNode }) {
   );
 }
 
-/** Shared helper: turn an /api/admin or /api/access error response into a readable French message. */
+/** URLs of the server being viewed (pages under /s/[serverId]): `api("admin?kind=note")`, `page("/staff")`. */
+export function useServerPaths() {
+  const { serverId } = useParams<{ serverId: string }>();
+  return {
+    serverId,
+    api: (path: string) => `/api/s/${serverId}/${path}`,
+    page: (path = "") => `/s/${serverId}${path}`
+  };
+}
+
+/** Shared helper: turn an API error response into a readable French message. */
 export function describeApiError(data: { error?: string; discordStatus?: number; permission?: string }, status: number): string {
   switch (data.error) {
     case "discord_role_update_failed":
@@ -118,7 +129,13 @@ export function describeApiError(data: { error?: string; discordStatus?: number;
     case "no_grade_roles_configured": return "Aucun rôle de grade configuré (page Accès & rôles).";
     case "unauthenticated": return "Session expirée : reconnecte-toi.";
     case "already_exists": return "Déjà dans la liste.";
-    case "bot_unavailable": return "Bot Discord injoignable (token ou serveur incorrect).";
+    case "bot_unavailable": return "Bot Discord injoignable (token incorrect, ou bot absent de ce serveur Discord).";
+    case "no_guild": return "Aucun serveur Discord lié : renseigne son ID dans Accès & rôles.";
+    case "guild_taken": return "Ce serveur Discord est déjà lié à un autre serveur du panel.";
+    case "invalid_timezone": return "Fuseau horaire inconnu (exemple : Europe/Paris).";
+    case "last_owner": return "Impossible : le serveur doit garder au moins un propriétaire.";
+    case "unknown_server": return "Serveur introuvable.";
+    case "forbidden": return "Accès refusé.";
     default: return `Erreur : ${data.error ?? status}`;
   }
 }
