@@ -9,6 +9,7 @@ import {
   banPlayer, getIncident, getScreenshotImage, getSecuritySettings, markIncidentRestored, reviewDetection, revokeBan, saveSecuritySettings, setScreenshotVerdict
 } from "@/lib/security";
 import { anticheatSchema, antiraidSchema } from "@/lib/security-config";
+import { enqueueBotAction, type BotActionKind } from "@/lib/security-live";
 import { analyzeScreenshot } from "@/lib/vision";
 
 export const runtime = "nodejs";
@@ -26,7 +27,11 @@ const SCHEMAS = {
   unban: { permission: "ban", schema: z.object({ banId: id }) },
   detection_review: { permission: "view_security", schema: z.object({ id, status: z.enum(["open", "confirmed", "dismissed"]) }) },
   incident_restore: { permission: "security_config", schema: z.object({ id }) },
-  screenshot_analyze: { permission: "screenshot", schema: z.object({ id }) }
+  screenshot_analyze: { permission: "screenshot", schema: z.object({ id }) },
+  discord_lockdown: { permission: "security_config", schema: z.object({ minutes: z.number().int().min(1).max(1440), lockChannels: z.boolean() }) },
+  discord_unlock: { permission: "security_config", schema: z.object({}) },
+  discord_backup: { permission: "security_config", schema: z.object({}) },
+  discord_restore: { permission: "security_config", schema: z.object({ backupId: id }) }
 } satisfies Record<string, { permission: Permission; schema: z.ZodTypeAny }>;
 
 type Kind = keyof typeof SCHEMAS;
@@ -83,6 +88,15 @@ export async function POST(req: NextRequest, { params }: ServerRouteContext) {
       if (!result.ok) return NextResponse.json({ error: "discord_role_update_failed", discordStatus: result.status }, { status: 502 });
       await markIncidentRestored(server.id, actor, incident.id);
       return NextResponse.json({ ok: true });
+    }
+
+    case "discord_lockdown":
+    case "discord_unlock":
+    case "discord_backup":
+    case "discord_restore": {
+      if (!server.guildId) return NextResponse.json({ error: "no_guild" }, { status: 409 });
+      const action = kind.slice("discord_".length) as BotActionKind;
+      return NextResponse.json({ ok: true, id: await enqueueBotAction(server.id, actor, action, data) });
     }
 
     case "screenshot_analyze": {

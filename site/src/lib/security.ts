@@ -198,7 +198,7 @@ export async function recordDetection(
   serverId: string,
   d: { playerId: number | null; playerName: string; kind: string; details: Record<string, unknown>; action: string; screenshotId?: number | null },
   now = new Date(),
-  ban: { source: Ban["source"]; reason: string } = { source: "anticheat", reason: `Anticheat : ${detectionLabel(d.kind)}` }
+  ban: { source: Ban["source"]; reason: string; expiresAt?: string | null } = { source: "anticheat", reason: `Anticheat : ${detectionLabel(d.kind)}` }
 ): Promise<number> {
   const row = await db.get<{ id: number }>(
     "INSERT INTO ac_detections (server_id, player_id, player_name, kind, details_json, action, screenshot_id, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
@@ -216,7 +216,7 @@ export async function recordDetection(
     );
   }
   if (d.action === "ban" && d.playerId) {
-    await banPlayer(serverId, SYSTEM_ACTOR, { playerId: d.playerId, reason: ban.reason.slice(0, 300), source: ban.source, expiresAt: null, detectionId: id }, now);
+    await banPlayer(serverId, SYSTEM_ACTOR, { playerId: d.playerId, reason: ban.reason.slice(0, 300), source: ban.source, expiresAt: ban.expiresAt ?? null, detectionId: id }, now);
   }
   return id;
 }
@@ -231,6 +231,22 @@ export async function listDetections(serverId: string, opts: { playerId?: number
   const rows = await db.all<DetectionRow>(`SELECT * FROM ac_detections WHERE ${where.join(" AND ")} ORDER BY id DESC LIMIT ?`, [...args, opts.limit ?? 100]);
   return rows.map(toDetection);
 }
+
+/** Detections of a player in the last hours that count towards escalation (false positives excluded). */
+export async function countStrikes(serverId: string, playerId: number, hours: number, now = new Date()): Promise<number> {
+  const row = await db.get<{ n: number }>(
+    "SELECT COUNT(*) AS n FROM ac_detections WHERE server_id = ? AND player_id = ? AND status <> 'dismissed' AND kind <> 'connection_refused' AND at >= ?",
+    [serverId, playerId, iso(new Date(now.getTime() - hours * 3600_000))]
+  );
+  return Number(row?.n ?? 0);
+}
+
+export async function hasActiveBan(serverId: string, playerId: number, now = new Date()): Promise<boolean> {
+  return Boolean(await db.get("SELECT 1 FROM bans WHERE server_id = ? AND player_id = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)", [serverId, playerId, iso(now)]));
+}
+
+/** End of a ban of `hours` (0: permanent). */
+export const banExpiry = (hours: number, now = new Date()) => (hours > 0 ? iso(new Date(now.getTime() + hours * 3600_000)) : null);
 
 export async function reviewDetection(serverId: string, actor: Actor, id: number, status: "confirmed" | "dismissed" | "open"): Promise<boolean> {
   const res = await db.run("UPDATE ac_detections SET status = ?, reviewed_by = ? WHERE server_id = ? AND id = ?", [status, actor.discordId, serverId, id]);
@@ -397,7 +413,10 @@ export async function pruneSecurityData(now = new Date()): Promise<number> {
     ),
     stmt("UPDATE ac_detections SET screenshot_id = NULL WHERE screenshot_id IS NOT NULL AND screenshot_id NOT IN (SELECT id FROM ac_screenshots)"),
     stmt("DELETE FROM ac_detections WHERE at < ?", [iso(new Date(now.getTime() - 180 * 86400_000))]),
-    stmt("DELETE FROM security_incidents WHERE at < ?", [iso(new Date(now.getTime() - 180 * 86400_000))])
+    stmt("DELETE FROM security_incidents WHERE at < ?", [iso(new Date(now.getTime() - 180 * 86400_000))]),
+    // Live screens nobody watches any more, and old bot actions.
+    stmt("DELETE FROM screen_frames WHERE watched_at < ?", [iso(new Date(now.getTime() - 3600_000))]),
+    stmt("DELETE FROM bot_actions WHERE created_at < ?", [iso(new Date(now.getTime() - 30 * 86400_000))])
   ]);
   return results[0].changes + results[1].changes;
 }

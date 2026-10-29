@@ -1,12 +1,13 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { Ban, Camera, Megaphone, MessageSquare, UserX } from "lucide-react";
+import { Ban, Camera, Megaphone, MessageSquare, Monitor, Snowflake, UserX } from "lucide-react";
 import type { LivePlayer, LiveState } from "@/lib/agent";
 import { formatDuration } from "@/lib/format";
 import { useServerPaths, useUI } from "@/app/ui";
 import { useCommand, usePolling } from "../use-command";
 import { useBanDialog } from "../security-actions";
+import ScreenViewer from "../screen-viewer";
 
 type Props = {
   initial: LiveState;
@@ -70,6 +71,19 @@ export default function LiveView({ initial, settingsHref, can }: Props) {
   const { data: live, refresh } = usePolling<LiveState>(paths.api("live"), initial, 4000);
   const now = useNow(live);
   const [query, setQuery] = useState("");
+  const [screen, setScreen] = useState<LivePlayer | null>(null);
+  const [frozen, setFrozen] = useState<Set<number>>(new Set());
+
+  async function freeze(p: LivePlayer) {
+    const on = !frozen.has(p.id);
+    if (await send("freeze", { target: p.id, on }, on ? `${p.name} est gelé` : `${p.name} est dégelé`)) {
+      setFrozen((prev) => {
+        const next = new Set(prev);
+        if (on) next.add(p.id); else next.delete(p.id);
+        return next;
+      });
+    }
+  }
 
   const visible = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -130,6 +144,8 @@ export default function LiveView({ initial, settingsHref, can }: Props) {
                       <span style={{ display: "inline-flex", gap: 6 }}>
                         {can.message && <button className="ibtn" title="Message privé" disabled={busy} onClick={() => message(p)}><MessageSquare size={14} /></button>}
                         {can.screenshot && <button className="ibtn" title="Capture d'écran (analysée par l'IA)" disabled={busy} onClick={() => send("screenshot", { target: p.id }, `Capture de ${p.name} envoyée à l'analyse`)}><Camera size={14} /></button>}
+                        {can.screenshot && <button className="ibtn" title="Écran en direct" onClick={() => setScreen(p)}><Monitor size={14} /></button>}
+                        {can.kick && <button className="ibtn" title={frozen.has(p.id) ? "Dégeler" : "Geler (bloque le joueur sur place)"} data-on={frozen.has(p.id)} disabled={busy} onClick={() => freeze(p)}><Snowflake size={14} /></button>}
                         {can.kick && <button className="ibtn bad" title="Kick" disabled={busy} onClick={() => kick(p)}><UserX size={14} /></button>}
                         {can.ban && p.playerId && <button className="ibtn bad" title="Bannir" onClick={() => ban(p.playerId as number, p.name)}><Ban size={14} /></button>}
                       </span>
@@ -141,6 +157,7 @@ export default function LiveView({ initial, settingsHref, can }: Props) {
           </div>
         )}
       </section>
+      {screen && <ScreenViewer target={screen.id} name={screen.name} onClose={() => setScreen(null)} />}
     </>
   );
 }

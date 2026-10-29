@@ -55,7 +55,7 @@ export function useCommand() {
   return { send, busy };
 }
 
-/** Poll a JSON endpoint while the page is visible. */
+/** Poll a JSON endpoint while the page is visible (an empty url never polls). */
 export function usePolling<T>(url: string, initial: T, everyMs: number): { data: T; refresh: () => void } {
   const [data, setData] = useState<T>(initial);
   const tick = useRef<() => void>(() => {});
@@ -65,7 +65,7 @@ export function usePolling<T>(url: string, initial: T, everyMs: number): { data:
     let timer: ReturnType<typeof setTimeout> | undefined;
     const load = async () => {
       clearTimeout(timer);
-      if (document.visibilityState === "visible") {
+      if (url && document.visibilityState === "visible") {
         const next = await fetch(url).then((r) => (r.ok ? r.json() : null)).catch(() => null);
         if (!stopped && next) setData(next as T);
       }

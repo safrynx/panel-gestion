@@ -40,3 +40,23 @@ test("dangerous permissions", () => {
   assert.equal(addedDangerous(String(base | PermissionFlagsBits.ManageRoles), String(base | PermissionFlagsBits.ManageRoles)), false); // already had it
   assert.equal(addedDangerous(base | PermissionFlagsBits.Administrator, base), false); // removing is fine
 });
+
+test("message protection: @everyone, mass mentions, invites and links, each only when enabled", async () => {
+  const { messageViolation } = await import("../src/messages");
+  const rules = { blockEveryone: true, maxMentions: 5, blockInvites: true, blockLinks: false };
+  const msg = (content: string, mentionCount = 0, everyone = false) => ({ content, mentionCount, everyone });
+  assert.equal(messageViolation(msg("salut @everyone"), rules), "everyone_mention");
+  assert.equal(messageViolation(msg("", 0, true), rules), "everyone_mention");
+  assert.equal(messageViolation(msg("hey", 6), rules), "mass_mention");
+  assert.equal(messageViolation(msg("hey", 5), rules), null);
+  assert.equal(messageViolation(msg("rejoins discord.gg/abc123"), rules), "invite_link");
+  assert.equal(messageViolation(msg("https://youtube.com/x"), rules), null);
+  assert.equal(messageViolation(msg("https://youtube.com/x"), { ...rules, blockLinks: true }), "link");
+  assert.equal(messageViolation(msg("@here"), { ...rules, blockEveryone: false }), null);
+});
+
+test("restore order: categories before their channels, then by position", async () => {
+  const { channelOrder } = await import("../src/backup");
+  const ch = (id: string, type: number, position: number) => ({ id, name: id, type, parentId: null, position, overwrites: [] });
+  assert.deepEqual(channelOrder([ch("text2", 0, 2), ch("cat", 4, 5), ch("text1", 0, 1), ch("cat0", 4, 0)]).map((c) => c.id), ["cat0", "cat", "text1", "text2"]);
+});

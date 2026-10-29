@@ -47,7 +47,7 @@ local function setting(kind)
 end
 
 local function exempt(src)
-    return not src or src <= 0 or not GetPlayerName(src) or IsPlayerAceAllowed(src, 'fiverax.bypass')
+    return not src or src <= 0 or not GetPlayerName(src) or IsPlayerAceAllowed(src, 'fiverax.bypass') or FVX.whitelisted(src)
 end
 
 -- Should this kind of thing be blocked for this player? (detection on, player not exempt)
@@ -69,7 +69,13 @@ local function detect(src, kind, details)
     if lastFlag[key] and os.time() - lastFlag[key] < 30 then return end
     lastFlag[key] = os.time()
 
-    FVX.pushEvent({ type = 'detection', session = FVX.sessions[src], name = GetPlayerName(src) or '?', kind = kind, action = conf.action, details = details or {}, timestamp = os.time() })
+    local event = { type = 'detection', session = FVX.sessions[src], name = GetPlayerName(src) or '?', kind = kind, action = conf.action, details = details or {}, timestamp = os.time() }
+    local ped = GetPlayerPed(src)
+    if ped and ped ~= 0 and DoesEntityExist(ped) then
+        local c = GetEntityCoords(ped)
+        event.pos = { c.x, c.y, c.z }
+    end
+    FVX.pushEvent(event)
     print(('[fiverax] Anticheat : %s (#%d) -> %s [%s]'):format(GetPlayerName(src) or '?', src, kind, conf.action))
 
     local punish = nil
@@ -372,6 +378,18 @@ RegisterNetEvent('fiverax:ac:resource', function(name)
     if type(name) ~= 'string' then return end
     -- A resource the server does not have started on the client: injected by an executor.
     if GetResourceState(name) == 'missing' then detect(src, 'injected_resource', { resource = name:sub(1, 80) }) end
+end)
+
+-- A resource stopped on one client only (a menu stopping protections). Restarts done by the server are not.
+local serverStopped = {}
+AddEventHandler('onResourceStop', function(name) serverStopped[name] = os.time() end)
+AddEventHandler('onResourceStart', function(name) serverStopped[name] = os.time() end)
+
+RegisterNetEvent('fiverax:ac:resstop', function(name)
+    local src = source
+    if type(name) ~= 'string' or dropping[src] then return end
+    if os.time() - (serverStopped[name] or 0) < 30 then return end
+    if GetResourceState(name) == 'started' then detect(src, 'resource_stop', { resource = name:sub(1, 80) }) end
 end)
 
 AddEventHandler('playerDropped', function()

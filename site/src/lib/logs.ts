@@ -10,7 +10,7 @@ export const LOG_GROUPS: Record<string, { label: string; actions: string[] }> = 
   access: { label: "Accès & rôles", actions: ["access_add", "access_remove", "access_permissions", "grade_role_add", "grade_role_remove", "warn_role_set"] },
   sync: { label: "Synchro, IA & reset", actions: ["staff_sync", "review_generate", "counters_reset"] },
   fivem: { label: "Serveur FiveM", actions: ["player_kick", "player_message", "announce", "resource", "console_command", "player_screenshot"] },
-  security: { label: "Sécurité", actions: ["player_ban", "player_unban", "anticheat_config", "antiraid_config", "antiraid_restore"] },
+  security: { label: "Sécurité", actions: ["player_ban", "player_unban", "anticheat_config", "antiraid_config", "antiraid_restore", "player_screen", "player_freeze", "discord_lockdown", "discord_unlock", "discord_backup", "discord_restore"] },
   server: { label: "Serveur", actions: ["server_create", "server_update", "owner_add", "owner_remove", "fivem_token_rotate"] }
 };
 
@@ -49,7 +49,13 @@ const ACTION_LABELS: Record<string, { label: string; tone: LogTone }> = {
   player_unban: { label: "Déban", tone: "up" },
   anticheat_config: { label: "Réglages anticheat", tone: "warn" },
   antiraid_config: { label: "Réglages anti-raid", tone: "warn" },
-  antiraid_restore: { label: "Rôles rendus", tone: "up" }
+  antiraid_restore: { label: "Rôles rendus", tone: "up" },
+  player_screen: { label: "Écran en direct", tone: "warn" },
+  player_freeze: { label: "Gel du joueur", tone: "warn" },
+  discord_lockdown: { label: "Discord verrouillé", tone: "danger" },
+  discord_unlock: { label: "Discord déverrouillé", tone: "up" },
+  discord_backup: { label: "Sauvegarde Discord", tone: "info" },
+  discord_restore: { label: "Restauration Discord", tone: "danger" }
 };
 
 const RESOURCE_VERBS: Record<string, string> = { start: "Démarrage", stop: "Arrêt", restart: "Redémarrage", refresh: "Rechargement de la liste des ressources" };
@@ -120,6 +126,17 @@ function describe(action: string, d: Record<string, unknown>): string {
       return "Réglages de l'anticheat modifiés";
     case "antiraid_config":
       return "Réglages de l'anti-raid modifiés";
+    case "player_screen":
+      return `${d.player ?? `#${d.target}`}`;
+    case "player_freeze":
+      return `${d.on ? "Gel" : "Dégel"} de ${d.player ?? `#${d.target}`}`;
+    case "discord_lockdown":
+      return `${d.minutes ?? "?"} min${d.lockChannels ? ", salons fermés" : ""}`;
+    case "discord_unlock":
+    case "discord_backup":
+      return "";
+    case "discord_restore":
+      return `Sauvegarde #${d.backupId ?? "?"}`;
     case "antiraid_restore":
       return `${d.roles ?? 0} rôle(s) rendu(s) après une sanction de l'anti-raid`;
     case "staff_sync":

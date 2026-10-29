@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { enqueueCommand, playerOfSession } from "@/lib/agent";
-import { decodeImage, getSecuritySettings, recordDetection, setScreenshotVerdict, storeScreenshot, SYSTEM_ACTOR } from "@/lib/security";
+import { sendAnticheatAlert } from "@/lib/alerts";
+import { banExpiry, decodeImage, getSecuritySettings, recordDetection, setScreenshotVerdict, storeScreenshot, SYSTEM_ACTOR } from "@/lib/security";
 import { serverForFivemToken } from "@/lib/servers";
 import { analyzeScreenshot } from "@/lib/vision";
 
@@ -55,8 +56,12 @@ export async function POST(req: NextRequest) {
         server.id,
         { playerId, playerName: data.name, kind: "ai_screenshot", details: { score: verdict.score, summary: verdict.summary }, action, screenshotId: id },
         new Date(),
-        { source: "ai", reason: `IA : ${verdict.summary ?? "triche visible à l'écran"}` }
+        { source: "ai", reason: `IA : ${verdict.summary ?? "triche visible à l'écran"}`, expiresAt: banExpiry(anticheat.banHours) }
       );
+      await sendAnticheatAlert(anticheat, server.name, {
+        kind: "ai_screenshot", action, playerName: data.name, note: `${verdict.summary ?? ""} (confiance ${verdict.score ?? "?"} %)`,
+        url: playerId ? `${(process.env.APP_URL || "").replace(/\/+$/, "")}/s/${server.id}/players/${playerId}` : null
+      });
       if ((action === "ban" || action === "kick") && data.target !== undefined) {
         await enqueueCommand(server.id, SYSTEM_ACTOR, "kick", { target: data.target, reason: action === "ban" ? anticheat.banMessage : "Anticheat : triche détectée" }, { playerName: data.name });
       }

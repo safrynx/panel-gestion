@@ -31,6 +31,10 @@ export default function AnticheatSettingsForm({ initial }: { initial: AnticheatS
   const [s, setS] = useState(initial);
   const [texts, setTexts] = useState(() => Object.fromEntries(LISTS.map(([k]) => [k, initial[k].join("\n")])) as Record<(typeof LISTS)[number][0], string>);
   const [explosions, setExplosions] = useState(initial.blockedExplosions.join(", "));
+  const [blockedNames, setBlockedNames] = useState(initial.connection.blockedNames.join("\n"));
+  const [whitelist, setWhitelist] = useState(initial.connection.whitelist.join("\n"));
+  const conn = s.connection;
+  const setConn = (patch: Partial<AnticheatSettings["connection"]>) => setS((prev) => ({ ...prev, connection: { ...prev.connection, ...patch } }));
 
   const setDetection = (key: string, patch: Partial<{ action: AcAction; screenshot: boolean }>) =>
     setS((prev) => ({ ...prev, detections: { ...prev.detections, [key]: { ...prev.detections[key as keyof typeof prev.detections], ...patch } } }));
@@ -40,7 +44,9 @@ export default function AnticheatSettingsForm({ initial }: { initial: AnticheatS
     const value: AnticheatSettings = {
       ...s,
       ...Object.fromEntries(LISTS.map(([k]) => [k, lines(texts[k])])),
-      blockedExplosions: lines(explosions).map(Number).filter((n) => Number.isInteger(n) && n >= 0 && n <= 100)
+      blockedExplosions: lines(explosions).map(Number).filter((n) => Number.isInteger(n) && n >= 0 && n <= 100),
+      connection: { ...s.connection, blockedNames: lines(blockedNames), whitelist: lines(whitelist).filter((id) => /^[a-z0-9]+:[\w.-]+$/i.test(id)) },
+      alerts: { ...s.alerts, webhookUrl: s.alerts.webhookUrl?.trim() || null }
     };
     await run("anticheat_config", value, "Réglages enregistrés : l'agent les applique à son prochain appel");
   }
@@ -56,6 +62,88 @@ export default function AnticheatSettingsForm({ initial }: { initial: AnticheatS
           <label style={{ display: "grid", gap: 6 }}>
             <span className="muted" style={{ fontSize: 12 }}>Message affiché au joueur banni</span>
             <input className="field" maxLength={300} required value={s.banMessage} onChange={(e) => setS({ ...s, banMessage: e.target.value })} />
+          </label>
+          <label style={{ display: "grid", gap: 6, maxWidth: 260 }}>
+            <span className="muted" style={{ fontSize: 12 }}>Durée des bans de l&apos;anticheat (heures, 0 = définitif)</span>
+            <input type="number" min={0} max={87600} className="field" value={s.banHours} onChange={(e) => setS({ ...s, banHours: Number(e.target.value) })} />
+          </label>
+        </div>
+      </section>
+
+      <section>
+        <header className="panel-head">
+          <h2 className="h2">Connexions</h2>
+          <p className="muted">Vérifié par l&apos;agent quand un joueur se connecte (avant le chargement). Les identifiants de la liste blanche passent toujours et ne sont jamais contrôlés par l&apos;anticheat.</p>
+        </header>
+        <div style={{ display: "grid", gap: 16, marginTop: 16, gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))" }}>
+          <div style={{ display: "grid", gap: 10, alignContent: "start" }}>
+            <label className="check" style={{ width: "fit-content" }}>
+              <input type="checkbox" checked={conn.locked} onChange={(e) => setConn({ locked: e.target.checked })} />Serveur verrouillé (liste blanche seulement)
+            </label>
+            {conn.locked && <input className="field" maxLength={300} value={conn.lockMessage} onChange={(e) => setConn({ lockMessage: e.target.value })} placeholder="Message affiché" />}
+            <label className="check" style={{ width: "fit-content" }}>
+              <input type="checkbox" checked={conn.requireDiscord} onChange={(e) => setConn({ requireDiscord: e.target.checked })} />Compte Discord obligatoire
+            </label>
+            <label className="check" style={{ width: "fit-content" }}>
+              <input type="checkbox" checked={conn.requireSteam} onChange={(e) => setConn({ requireSteam: e.target.checked })} />Steam obligatoire
+            </label>
+            <label style={{ display: "grid", gap: 6, maxWidth: 220 }}>
+              <span className="muted" style={{ fontSize: 12 }}>Longueur minimale du pseudo (0 = libre)</span>
+              <input type="number" min={0} max={20} className="field" value={conn.minNameLength} onChange={(e) => setConn({ minNameLength: Number(e.target.value) })} />
+            </label>
+          </div>
+          <label style={{ display: "grid", gap: 6, alignContent: "start" }}>
+            <span><b>Pseudos interdits</b> <span className="muted" style={{ fontSize: 12 }}>· un mot par ligne (contenu dans le pseudo, sans casse)</span></span>
+            <textarea className="field" rows={6} value={blockedNames} onChange={(e) => setBlockedNames(e.target.value)} style={{ fontFamily: "ui-monospace, monospace", fontSize: 12 }} />
+          </label>
+          <label style={{ display: "grid", gap: 6, alignContent: "start" }}>
+            <span><b>Liste blanche</b> <span className="muted" style={{ fontSize: 12 }}>· identifiants complets (license:…, discord:…, steam:…)</span></span>
+            <textarea className="field" rows={6} value={whitelist} onChange={(e) => setWhitelist(e.target.value)} style={{ fontFamily: "ui-monospace, monospace", fontSize: 12 }} placeholder="discord:123456789012345678" />
+          </label>
+        </div>
+      </section>
+
+      <section>
+        <header className="panel-head">
+          <h2 className="h2">Cumul de détections</h2>
+          <p className="muted">Les petites détections (« Signaler ») s&apos;additionnent par joueur : au seuil, kick puis ban automatique. Les faux positifs marqués ne comptent pas.</p>
+        </header>
+        <div style={{ display: "grid", gap: 14, marginTop: 16, gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))" }}>
+          <label className="check" style={{ alignSelf: "end", width: "fit-content" }}>
+            <input type="checkbox" checked={s.strikes.enabled} onChange={(e) => setS({ ...s, strikes: { ...s.strikes, enabled: e.target.checked } })} />Activer le cumul
+          </label>
+          <label style={{ display: "grid", gap: 6 }}>
+            <span className="muted" style={{ fontSize: 12 }}>Sur les dernières (heures)</span>
+            <input type="number" min={1} max={720} className="field" value={s.strikes.windowHours} onChange={(e) => setS({ ...s, strikes: { ...s.strikes, windowHours: Number(e.target.value) } })} />
+          </label>
+          <label style={{ display: "grid", gap: 6 }}>
+            <span className="muted" style={{ fontSize: 12 }}>Kick à (détections, 0 = jamais)</span>
+            <input type="number" min={0} max={100} className="field" value={s.strikes.kickAt} onChange={(e) => setS({ ...s, strikes: { ...s.strikes, kickAt: Number(e.target.value) } })} />
+          </label>
+          <label style={{ display: "grid", gap: 6 }}>
+            <span className="muted" style={{ fontSize: 12 }}>Ban à (détections, 0 = jamais)</span>
+            <input type="number" min={0} max={100} className="field" value={s.strikes.banAt} onChange={(e) => setS({ ...s, strikes: { ...s.strikes, banAt: Number(e.target.value) } })} />
+          </label>
+        </div>
+      </section>
+
+      <section>
+        <header className="panel-head"><h2 className="h2">Alertes Discord</h2><p className="muted">Un webhook de ton salon staff (Paramètres du salon &gt; Intégrations &gt; Webhooks) reçoit les détections en direct.</p></header>
+        <div style={{ display: "grid", gap: 14, marginTop: 16, gridTemplateColumns: "2fr 1fr", maxWidth: 900 }}>
+          <label style={{ display: "grid", gap: 6 }}>
+            <span className="muted" style={{ fontSize: 12 }}>URL du webhook</span>
+            <input className="field" value={s.alerts.webhookUrl ?? ""} onChange={(e) => setS({ ...s, alerts: { ...s.alerts, webhookUrl: e.target.value || null } })} placeholder="https://discord.com/api/webhooks/…" />
+          </label>
+          <label style={{ display: "grid", gap: 6 }}>
+            <span className="muted" style={{ fontSize: 12 }}>Envoyer à partir de</span>
+            <select className="field" value={s.alerts.minAction} onChange={(e) => setS({ ...s, alerts: { ...s.alerts, minAction: e.target.value as AnticheatSettings["alerts"]["minAction"] } })}>
+              <option value="log">Toutes les détections</option>
+              <option value="kick">Kicks et bans</option>
+              <option value="ban">Bans seulement</option>
+            </select>
+          </label>
+          <label className="check" style={{ width: "fit-content" }}>
+            <input type="checkbox" checked={s.alerts.aiCheat} onChange={(e) => setS({ ...s, alerts: { ...s.alerts, aiCheat: e.target.checked } })} />Toujours alerter quand l&apos;IA voit un cheat
           </label>
         </div>
       </section>
@@ -148,7 +236,7 @@ export default function AnticheatSettingsForm({ initial }: { initial: AnticheatS
 
       <div className="save-bar">
         <button className="btn primary" disabled={busy}>Enregistrer les réglages</button>
-        <button type="button" className="btn" disabled={busy} onClick={() => { setS(initial); setTexts(Object.fromEntries(LISTS.map(([k]) => [k, initial[k].join("\n")])) as typeof texts); setExplosions(initial.blockedExplosions.join(", ")); }}>Annuler les modifications</button>
+        <button type="button" className="btn" disabled={busy} onClick={() => { setS(initial); setTexts(Object.fromEntries(LISTS.map(([k]) => [k, initial[k].join("\n")])) as typeof texts); setExplosions(initial.blockedExplosions.join(", ")); setBlockedNames(initial.connection.blockedNames.join("\n")); setWhitelist(initial.connection.whitelist.join("\n")); }}>Annuler les modifications</button>
       </div>
     </form>
   );

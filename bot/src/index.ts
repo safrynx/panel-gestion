@@ -1,5 +1,7 @@
 import { Client, Events, GatewayIntentBits, type Guild, type GuildMember, type PartialGuildMember } from "discord.js";
 import { indexGuildMembers, memberChanged, setAntiraidConfig, setupAntiraid } from "./antiraid";
+import { setupActions } from "./actions";
+import { onMessage } from "./messages";
 import { siteConfig, sitePost } from "./api";
 import { playtimeSources, readPlaytimeTotals, type PlaytimeSource } from "./playtime";
 
@@ -30,7 +32,11 @@ const SERVERS_MS = 5 * 60_000;
 
 const client = new Client({
   // GuildModeration: audit log entries and bans, read by the anti-raid.
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildVoiceStates, GatewayIntentBits.GuildModeration]
+  // GuildMessages: message protection (flood, mentions). MessageContent (privileged, opt-in): invites and links.
+  intents: [
+    GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildVoiceStates, GatewayIntentBits.GuildModeration, GatewayIntentBits.GuildMessages,
+    ...(process.env.BOT_MESSAGE_CONTENT === "1" ? [GatewayIntentBits.MessageContent] : [])
+  ]
 });
 
 /** Guild ids of the servers registered on the site. */
@@ -118,6 +124,7 @@ client.once(Events.ClientReady, async (readyClient) => {
   console.log(`Staff bot connected as ${readyClient.user.tag} (${readyClient.guilds.cache.size} guild(s)) -> site ${siteConfig().url}`);
   scheduleSync(0);
   setupAntiraid(readyClient, (guildId) => watched.has(guildId));
+  setupActions(readyClient, (guildId) => watched.has(guildId));
 
   // A server registered on the site is picked up within a few minutes, without restarting the bot.
   setInterval(async () => {
@@ -182,6 +189,10 @@ client.on(Events.GuildMemberRemove, (m) => {
   if (!watched.has(m.guild.id) || m.user.bot) return;
   void sitePost("member", { guildId: m.guild.id, ...memberPayload(m, false) });
   void sitePost("voice", { guildId: m.guild.id, action: "leave", discordId: m.id, roleIds: [], at: new Date().toISOString() });
+});
+
+client.on(Events.MessageCreate, (message) => {
+  if (message.guildId && watched.has(message.guildId)) void onMessage(message).catch((e) => console.error("[messages] check failed:", e instanceof Error ? e.message : e));
 });
 
 client.on(Events.VoiceStateUpdate, (oldState, newState) => {

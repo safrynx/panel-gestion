@@ -1,5 +1,5 @@
 "use client";
-import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 
 type AskInput = { label: string; placeholder?: string; required?: boolean; multiline?: boolean; initial?: string };
@@ -103,11 +103,12 @@ export function UIProvider({ children }: { children: React.ReactNode }) {
 /** URLs of the server being viewed (pages under /s/[serverId]): `api("admin?kind=note")`, `page("/staff")`. */
 export function useServerPaths() {
   const { serverId } = useParams<{ serverId: string }>();
-  return {
+  // Stable between renders, so it can sit in effect / callback dependencies.
+  return useMemo(() => ({
     serverId,
     api: (path: string) => `/api/s/${serverId}/${path}`,
     page: (path = "") => `/s/${serverId}${path}`
-  };
+  }), [serverId]);
 }
 
 /** Shared helper: turn an API error response into a readable French message. */

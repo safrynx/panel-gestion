@@ -505,6 +505,47 @@ const migrations: { name: string; sql: string }[] = [
       CREATE INDEX IF NOT EXISTS idx_security_incidents ON security_incidents(server_id, id);
       ALTER TABLE players ADD COLUMN tokens_json TEXT NOT NULL DEFAULT '[]'
     `
+  },
+  {
+    // Live screen of a player (latest frame only), actions queued for the Discord bot (lockdown, backups), and the
+    // backups of each guild's roles and channels.
+    name: "017_security_live",
+    sql: `
+      CREATE TABLE IF NOT EXISTS screen_frames (
+        server_id TEXT NOT NULL,
+        target INTEGER NOT NULL,
+        player_name TEXT NOT NULL,
+        image BLOB,
+        mime TEXT,
+        at TEXT,
+        watched_at TEXT NOT NULL,
+        PRIMARY KEY (server_id, target)
+      );
+      CREATE TABLE IF NOT EXISTS bot_actions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        server_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        payload TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL DEFAULT 'pending',
+        result TEXT,
+        actor_discord_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        sent_at TEXT,
+        done_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_bot_actions_queue ON bot_actions(status, id);
+      CREATE TABLE IF NOT EXISTS discord_backups (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        server_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        roles_count INTEGER NOT NULL DEFAULT 0,
+        channels_count INTEGER NOT NULL DEFAULT 0,
+        members_count INTEGER NOT NULL DEFAULT 0,
+        data_json TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_discord_backups ON discord_backups(server_id, id)
+    `
   }
 ];
 

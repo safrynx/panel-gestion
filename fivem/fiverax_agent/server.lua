@@ -15,7 +15,7 @@
 --   ensure screenshot-basic                           # optional: screenshots analysed by the AI
 --   ensure fiverax_agent
 
-local VERSION = '3.0.0'
+local VERSION = '3.1.0'
 local RESOURCE = GetCurrentResourceName()
 
 -- The 1.x convars (gtasun_staff_api_url pointed at /api/fivem) still work.
@@ -154,15 +154,59 @@ function FVX.localBan(src, reason)
     return ban
 end
 
-AddEventHandler('playerConnecting', function(_, _, deferrals)
+-- Identifiers listed in the settings (connection.whitelist): let in while the server is locked, never checked.
+function FVX.whitelisted(src)
+    local list = FVX.settings and FVX.settings.connection and FVX.settings.connection.whitelist
+    if not list or #list == 0 then return false end
+    local set = {}
+    for _, id in ipairs(list) do set[id] = true end
+    for _, id in ipairs(GetPlayerIdentifiers(src)) do
+        if set[id] then return true end
+    end
+    return false
+end
+
+local function hasIdentifier(src, prefix)
+    for _, id in ipairs(GetPlayerIdentifiers(src)) do
+        if id:sub(1, #prefix) == prefix then return true end
+    end
+    return false
+end
+
+-- Why this player may not join (nil: welcome).
+local function refusal(src, name)
+    local ban = FVX.findBan(src)
+    if ban then return FVX.banMessage(ban), 'banni' end
+    local conn = FVX.settings and FVX.settings.connection
+    if not conn or FVX.whitelisted(src) then return nil end
+    if conn.locked then return conn.lockMessage, 'serveur verrouillé' end
+    if conn.requireDiscord and not hasIdentifier(src, 'discord:') then
+        return 'Relie ton compte Discord à FiveM (Paramètres > Comptes liés) pour rejoindre ce serveur.', 'Discord manquant'
+    end
+    if conn.requireSteam and not hasIdentifier(src, 'steam:') then
+        return 'Lance Steam avant FiveM pour rejoindre ce serveur.', 'Steam manquant'
+    end
+    local clean = (name or ''):gsub('%^%d', '')
+    if (conn.minNameLength or 0) > 0 and #clean < conn.minNameLength then
+        return ('Ton pseudo doit faire au moins %d caractères.'):format(conn.minNameLength), 'pseudo trop court'
+    end
+    local lower = clean:lower()
+    for _, word in ipairs(conn.blockedNames or {}) do
+        if word ~= '' and lower:find(word:lower(), 1, true) then return 'Ce pseudo n\'est pas autorisé sur ce serveur.', 'pseudo interdit : ' .. word end
+    end
+    return nil
+end
+
+AddEventHandler('playerConnecting', function(name, _, deferrals)
     local src = source
     deferrals.defer()
     Wait(0)
-    local ban = FVX.findBan(src)
-    if ban then
-        deferrals.done(FVX.banMessage(ban))
-    else
-        deferrals.done()
+    local message, why = refusal(src, name)
+    if not message then return deferrals.done() end
+    deferrals.done(message)
+    local conf = FVX.settings and FVX.settings.detections and FVX.settings.detections.connection_refused
+    if not conf or conf.action ~= 'off' then
+        FVX.pushEvent({ type = 'refused', name = name or '?', reason = why, identifiers = FVX.identifiers(src), timestamp = os.time() })
     end
 end)
 
@@ -241,6 +285,36 @@ function FVX.screenshot(src, reason, cb)
     end)
 end
 
+-- ---- live screen: frames sent while the panel watches ----
+
+local streaming = {}
+
+local function streamScreen(src)
+    if streaming[src] then return end
+    streaming[src] = true
+    CreateThread(function()
+        local started = os.time()
+        while streaming[src] and GetPlayerName(src) and os.time() - started < 600 do
+            local p = promise.new()
+            exports['screenshot-basic']:requestClientScreenshot(src, { encoding = 'jpg', quality = 0.35 }, function(err, data)
+                p:resolve(not err and data or nil)
+            end)
+            local data = Citizen.Await(p)
+            if not data then break end
+            local sent = promise.new()
+            PerformHttpRequest(URL .. '/api/fivem/agent/frame', function(status, body)
+                local ok, decoded = pcall(json.decode, body or '')
+                sent:resolve(status == 200 and ok and decoded and decoded.continue == true)
+            end, 'POST', json.encode({ target = src, name = GetPlayerName(src) or '?', image = data }), HEADERS)
+            if not Citizen.Await(sent) then break end
+            Wait(250)
+        end
+        streaming[src] = nil
+    end)
+end
+
+AddEventHandler('playerDropped', function() streaming[source] = nil end)
+
 -- ---- actions from the panel: each returns ok, message ----
 
 local function online(target)
@@ -281,6 +355,21 @@ local handlers = {
         if GetResourceState('screenshot-basic') ~= 'started' then return false, 'Installe et démarre screenshot-basic sur le serveur FiveM' end
         FVX.screenshot(p.target, 'manual')
         return true, 'Capture en cours'
+    end,
+    screen = function(p)
+        if not online(p.target) then return false, 'Joueur déconnecté' end
+        if GetResourceState('screenshot-basic') ~= 'started' then return false, 'Installe et démarre screenshot-basic sur le serveur FiveM' end
+        streamScreen(p.target)
+        return true, 'Écran en direct démarré'
+    end,
+    freeze = function(p)
+        if not online(p.target) then return false, 'Joueur déconnecté' end
+        local ped = GetPlayerPed(p.target)
+        if not ped or ped == 0 then return false, 'Personnage introuvable' end
+        FreezeEntityPosition(ped, p.on == true)
+        local vehicle = GetVehiclePedIsIn(ped, false)
+        if vehicle and vehicle ~= 0 then FreezeEntityPosition(vehicle, p.on == true) end
+        return true, p.on and 'Joueur gelé' or 'Joueur dégelé'
     end,
     console = function(p)
         if not ALLOW_CONSOLE then return false, 'Console désactivée sur ce serveur (fiverax_console 0)' end

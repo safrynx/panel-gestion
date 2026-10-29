@@ -38,7 +38,9 @@ export const DETECTIONS = [
   { key: "injected_resource", group: "Client", label: "Ressource injectée", hint: "Une ressource inconnue du serveur démarre chez le joueur (executor).", action: "ban", screenshot: true },
   { key: "spectate", group: "Client", label: "Mode spectateur", hint: "Spectate actif sans être staff.", action: "log", screenshot: true },
   { key: "vision", group: "Client", label: "Vision thermique / nocturne", hint: "Utilisée aussi par certains jobs : à activer selon ton serveur.", action: "off", screenshot: false },
-  { key: "ai_screenshot", group: "IA", label: "Capture jugée « cheat » par l'IA", hint: "Menu de cheat, ESP ou aimbot visible à l'écran.", action: "log", screenshot: false }
+  { key: "resource_stop", group: "Client", label: "Ressource arrêtée chez le joueur", hint: "Une ressource du serveur s'arrête chez lui seul (menu qui coupe l'anticheat ou un script).", action: "kick", screenshot: true },
+  { key: "ai_screenshot", group: "IA", label: "Capture jugée « cheat » par l'IA", hint: "Menu de cheat, ESP ou aimbot visible à l'écran.", action: "log", screenshot: false },
+  { key: "connection_refused", group: "Connexion", label: "Connexion refusée", hint: "Banni, serveur verrouillé, compte requis manquant, pseudo interdit. « Signaler » les garde dans le journal.", action: "log", screenshot: false }
 ] as const satisfies readonly { key: string; group: string; label: string; hint: string; action: AcAction; screenshot: boolean }[];
 
 export type DetectionKind = (typeof DETECTIONS)[number]["key"];
@@ -111,6 +113,41 @@ export const anticheatSchema = z.object({
       /** Ban automatically when the AI says "cheat" with at least this confidence (0: never ban on the AI alone). */
       autoBanScore: z.number().int().min(0).max(100).default(0)
     })
+    .default({}),
+  /** Length of the bans given by the anticheat (0: permanent). */
+  banHours: z.number().int().min(0).max(24 * 3650).default(0),
+  /** Escalation: detections of one player add up over the window (dismissed ones do not count). */
+  strikes: z
+    .object({
+      enabled: z.boolean().default(false),
+      windowHours: z.number().int().min(1).max(720).default(24),
+      kickAt: z.number().int().min(0).max(100).default(3),
+      banAt: z.number().int().min(0).max(100).default(6)
+    })
+    .default({}),
+  /** Discord webhook receiving the anticheat alerts. */
+  alerts: z
+    .object({
+      webhookUrl: z.string().trim().regex(/^https:\/\/(?:canary\.|ptb\.)?discord(?:app)?\.com\/api\/webhooks\/\d+\/[\w-]+$/).nullable().default(null),
+      /** Lowest action alerted: log = every detection. */
+      minAction: z.enum(["log", "kick", "ban"]).default("kick"),
+      aiCheat: z.boolean().default(true)
+    })
+    .default({}),
+  /** Who may join: checked by the agent when a player connects. */
+  connection: z
+    .object({
+      /** Server locked (maintenance, event): only whitelisted identifiers get in. */
+      locked: z.boolean().default(false),
+      lockMessage: z.string().trim().min(1).max(300).default("Le serveur est fermé pour le moment. Reviens plus tard !"),
+      requireDiscord: z.boolean().default(false),
+      requireSteam: z.boolean().default(false),
+      minNameLength: z.number().int().min(0).max(20).default(0),
+      /** Refused when the name contains one of these (case ignored). */
+      blockedNames: nameList(200).default([]),
+      /** Identifiers (license:…, discord:…) let in while locked and never checked by the anticheat. */
+      whitelist: z.array(z.string().trim().regex(/^[a-z0-9]+:[\w.-]+$/i)).max(500).default([])
+    })
     .default({})
 });
 
@@ -119,9 +156,11 @@ export const DEFAULT_ANTICHEAT: AnticheatSettings = anticheatSchema.parse({});
 
 // ---- Discord anti-raid ----
 
-export const PUNISHMENTS = ["derank", "kick", "ban"] as const;
+export const PUNISHMENTS = ["derank", "quarantine", "timeout", "kick", "ban"] as const;
 export const PUNISHMENT_LABELS: Record<(typeof PUNISHMENTS)[number], string> = {
   derank: "Derank (retirer tous ses rôles)",
+  quarantine: "Quarantaine (derank + rôle de quarantaine)",
+  timeout: "Exclusion temporaire (derank + mute)",
   kick: "Expulser du Discord",
   ban: "Bannir du Discord"
 };
@@ -144,7 +183,9 @@ export const RAID_RULES = [
   { key: "prune", label: "Purge de membres", undo: "Aucun", max: 0, windowSec: 60 },
   { key: "bot_add", label: "Ajout d'un bot", undo: "Bot expulsé", max: 0, windowSec: 60 },
   { key: "webhook_create", label: "Création de webhooks", undo: "Webhooks supprimés", max: 1, windowSec: 60 },
-  { key: "guild_update", label: "Modification du serveur", undo: "Nom du serveur remis", max: 0, windowSec: 60 }
+  { key: "guild_update", label: "Modification du serveur", undo: "Nom du serveur remis", max: 0, windowSec: 60 },
+  { key: "protected_role", label: "Rôle protégé donné ou retiré", undo: "Changement annulé (rôles protégés ci-dessus)", max: 0, windowSec: 60 },
+  { key: "channel_update", label: "Permissions de salons modifiées en masse", undo: "Aucun (signalé et sanctionné)", max: 6, windowSec: 60 }
 ] as const;
 
 export type RaidRuleKey = (typeof RAID_RULES)[number]["key"];
@@ -176,7 +217,36 @@ export const antiraidSchema = z.object({
     })
     .default({}),
   /** Kick accounts younger than this (0: off). */
-  minAccountAgeDays: z.number().int().min(0).max(365).default(0)
+  minAccountAgeDays: z.number().int().min(0).max(365).default(0),
+  /** Role given with the "quarantine" punishment (no access anywhere). */
+  quarantineRoleId: snowflake.nullable().default(null),
+  /** Mute length of the "timeout" punishment and of the message protection. */
+  timeoutMinutes: z.number().int().min(1).max(40320).default(60),
+  /** Roles nobody but trusted people may give, remove, delete or edit. */
+  protectedRoles: z.array(snowflake).max(100).default([]),
+  /** Channels whose deletion always triggers at once. */
+  protectedChannels: z.array(snowflake).max(200).default([]),
+  /** DM the Discord owner on each incident. */
+  alertOwnerDm: z.boolean().default(false),
+  /** Automatic backup of roles and channels (hours between two, 0: off). */
+  backupEveryHours: z.number().int().min(0).max(168).default(12),
+  messages: z
+    .object({
+      enabled: z.boolean().default(false),
+      /** More than floodCount messages in floodSeconds = flood. */
+      floodCount: z.number().int().min(3).max(50).default(6),
+      floodSeconds: z.number().int().min(2).max(60).default(5),
+      /** Users + roles mentioned in one message. */
+      maxMentions: z.number().int().min(2).max(50).default(6),
+      blockEveryone: z.boolean().default(true),
+      /** Needs the Message Content intent (BOT_MESSAGE_CONTENT=1 on the bot). */
+      blockInvites: z.boolean().default(false),
+      blockLinks: z.boolean().default(false),
+      /** Members with one of these roles are never checked (staff). */
+      ignoredRoles: z.array(snowflake).max(100).default([]),
+      ignoredChannels: z.array(snowflake).max(200).default([])
+    })
+    .default({})
 });
 
 export type AntiraidSettings = z.infer<typeof antiraidSchema>;
@@ -187,5 +257,14 @@ export const INCIDENT_LABELS: Record<string, string> = {
   ...Object.fromEntries(RAID_RULES.map((r) => [r.key, r.label])),
   join_raid: "Raid de comptes (arrivées en masse)",
   young_account: "Compte trop récent",
-  lockdown_end: "Fin du verrouillage"
+  lockdown_end: "Fin du verrouillage",
+  lockdown: "Verrouillage manuel",
+  unlock: "Déverrouillage",
+  message_flood: "Flood de messages",
+  mass_mention: "Mentions de masse",
+  everyone_mention: "@everyone / @here",
+  invite_link: "Invitation Discord",
+  link: "Lien interdit",
+  backup: "Sauvegarde",
+  backup_restore: "Restauration d'une sauvegarde"
 };

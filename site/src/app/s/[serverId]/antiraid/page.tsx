@@ -3,25 +3,35 @@ import { can, requirePermissionPage } from "@/lib/auth";
 import { getServerStatus } from "@/lib/bot-status";
 import { db } from "@/lib/db";
 import { getSecuritySettings, listIncidents } from "@/lib/security";
+import { listBackups, listBotActions } from "@/lib/security-live";
 import { INCIDENT_LABELS, PUNISHMENT_LABELS } from "@/lib/security-config";
 import { formatDateTime } from "@/lib/format";
 import Shell, { PageHead } from "@/app/shell";
 import { AutoRefresh } from "../security-actions";
 import AntiraidSettingsForm from "./settings-form";
 import RestoreButton from "./restore-button";
+import DiscordControls, { RestoreBackupButton } from "./discord-controls";
+
+const ACTION_LABELS: Record<string, string> = { lockdown: "Verrouillage", unlock: "Déverrouillage", backup: "Sauvegarde", restore: "Restauration" };
+const ACTION_STATUS: Record<string, [string, string]> = {
+  pending: ["En attente du bot", "neutral"], sent: ["En cours", "info"], done: ["Fait", "up"], failed: ["Échec", "danger"], expired: ["Bot absent", "warn"]
+};
 
 export const dynamic = "force-dynamic";
 
 export default async function AntiraidPage({ params, searchParams }: { params: Promise<{ serverId: string }>; searchParams: Promise<{ tab?: string }> }) {
   const { user, server } = await requirePermissionPage((await params).serverId, "view_security");
   const canConfig = can(user, "security_config");
-  const tab = (await searchParams).tab === "settings" && canConfig ? "settings" : "incidents";
+  const requested = (await searchParams).tab;
+  const tab = requested === "settings" && canConfig ? "settings" : requested === "backups" ? "backups" : "incidents";
   const base = `/s/${server.id}/antiraid`;
-  const [settings, incidents, heartbeat, roles] = await Promise.all([
+  const [settings, incidents, heartbeat, roles, backups, actions] = await Promise.all([
     getSecuritySettings(server.id),
     tab === "incidents" ? listIncidents(server.id, 150) : Promise.resolve([]),
     getServerStatus(server.id, "heartbeat"),
-    db.all<{ id: string; name: string }>("SELECT id, name FROM discord_roles WHERE server_id = ? ORDER BY position DESC", [server.id])
+    db.all<{ id: string; name: string }>("SELECT id, name FROM discord_roles WHERE server_id = ? ORDER BY position DESC", [server.id]),
+    tab === "backups" ? listBackups(server.id) : Promise.resolve([]),
+    listBotActions(server.id, 5)
   ]);
   const roleName = new Map(roles.map((r) => [r.id, r.name]));
   const botOnline = Boolean(heartbeat && Date.now() - new Date(heartbeat).getTime() < 3 * 60_000);
@@ -29,10 +39,10 @@ export default async function AntiraidPage({ params, searchParams }: { params: P
 
   return (
     <Shell user={user} server={server} active="antiraid">
-      <PageHead kicker={server.name} title="Anti-raid Discord">
+      <PageHead kicker={server.name} title="Anti-raid Discord" actions={canConfig ? <DiscordControls disabled={!server.guildId} /> : undefined}>
         Le bot surveille le journal d&apos;audit du Discord en temps réel : il annule les actions destructrices (rôles et salons supprimés, retraits de rôles en masse, bans en masse…) et sanctionne leur auteur.
       </PageHead>
-      {tab === "incidents" && <AutoRefresh everyMs={15_000} />}
+      {tab !== "settings" && <AutoRefresh everyMs={10_000} />}
 
       {!server.guildId && <div className="banner"><b>Aucun serveur Discord lié.</b> Renseigne-le dans Configuration.</div>}
       {server.guildId && !botOnline && <div className="banner"><b>Le bot Discord ne répond pas.</b> L&apos;anti-raid ne fonctionne que si le bot tourne.</div>}
@@ -45,8 +55,19 @@ export default async function AntiraidPage({ params, searchParams }: { params: P
         <div className="rise rise-4"><div className="eyebrow">Incidents</div><div className="num" style={{ fontSize: 22 }}>{incidents.length}</div><small>récents</small></div>
       </div>
 
+      {actions.length > 0 && (
+        <div className="filters rise rise-1" style={{ gap: 8 }}>
+          <span className="eyebrow">Dernières commandes</span>
+          {actions.map((a) => {
+            const [label, tone] = ACTION_STATUS[a.status] ?? [a.status, "neutral"];
+            return <span key={a.id} className="tag" data-tone={tone} title={a.result ?? ""}>{ACTION_LABELS[a.kind] ?? a.kind} · {label} · {formatDateTime(a.created_at)}</span>;
+          })}
+        </div>
+      )}
+
       <div className="pill-tabs rise rise-1" style={{ marginBottom: 22 }}>
         <Link href={base} data-on={tab === "incidents"}>Incidents</Link>
+        <Link href={`${base}?tab=backups`} data-on={tab === "backups"}>Sauvegardes</Link>
         {canConfig && <Link href={`${base}?tab=settings`} data-on={tab === "settings"}>Réglages</Link>}
       </div>
 
@@ -87,7 +108,37 @@ export default async function AntiraidPage({ params, searchParams }: { params: P
         </div>
       )}
 
-      {tab === "settings" && canConfig && <AntiraidSettingsForm initial={ar} />}
+      {tab === "backups" && (
+        <>
+          <p className="muted" style={{ marginTop: 0 }}>
+            Copie des rôles (et permissions), des salons (et permissions) et des rôles de chaque membre. Automatique toutes les {ar.backupEveryHours || "—"} h{ar.backupEveryHours ? "" : " (désactivée)"}, les 15 dernières sont gardées.
+            Après un nuke, une restauration recrée tout ce qui manque.
+          </p>
+          {backups.length === 0 && <p className="muted" style={{ padding: "20px 0" }}>Aucune sauvegarde pour l&apos;instant{canConfig ? " : clique sur « Sauvegarder »." : "."}</p>}
+          {backups.length > 0 && (
+            <div className="tbl-wrap rise rise-2">
+              <table className="tbl" style={{ minWidth: 640 }}>
+                <thead><tr><th>#</th><th>Date</th><th>Type</th><th>Rôles</th><th>Salons</th><th>Membres</th>{canConfig && <th />}</tr></thead>
+                <tbody>
+                  {backups.map((b) => (
+                    <tr key={b.id}>
+                      <td className="num-cell muted">#{b.id}</td>
+                      <td className="num-cell">{formatDateTime(b.createdAt)}</td>
+                      <td>{b.reason}</td>
+                      <td className="num-cell">{b.roles}</td>
+                      <td className="num-cell">{b.channels}</td>
+                      <td className="num-cell">{b.members}</td>
+                      {canConfig && <td style={{ textAlign: "right" }}><RestoreBackupButton id={b.id} disabled={!botOnline} /></td>}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
+      )}
+
+      {tab === "settings" && canConfig && <AntiraidSettingsForm initial={ar} roles={roles} />}
     </Shell>
   );
 }

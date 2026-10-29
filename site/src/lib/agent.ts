@@ -3,8 +3,10 @@ import { auditStmt } from "./audit";
 import { db, stmt, type Stmt } from "./db";
 import { ingestFivemEvent } from "./fivem";
 import type { Permission } from "./permissions";
-import { activeBansForAgent, getSecuritySettings, recordDetection } from "./security";
-import { AC_ACTIONS, type AnticheatSettings } from "./security-config";
+import { sendAnticheatAlert } from "./alerts";
+import { activeBansForAgent, banExpiry, banPlayer, countStrikes, getSecuritySettings, hasActiveBan, recordDetection, SYSTEM_ACTOR } from "./security";
+import { getServer } from "./servers";
+import { AC_ACTIONS, detectionLabel, type AnticheatSettings } from "./security-config";
 
 /**
  * Two-way FiveM agent (resource `fiverax_agent`).
@@ -46,8 +48,13 @@ export const agentRequestSchema = z.object({
       z.object({ type: z.literal("leave"), session, reason: z.string().max(200).optional(), timestamp }),
       z.object({
         type: z.literal("detection"), session: session.optional(), name: z.string().max(100), kind: z.string().regex(/^[a-z_]{2,40}$/),
-        action: z.enum(AC_ACTIONS), details: z.record(z.string(), z.unknown()).optional(), timestamp
-      })
+        action: z.enum(AC_ACTIONS), details: z.record(z.string(), z.unknown()).optional(),
+        /** Where it happened, for the map. */
+        pos: z.array(z.number()).length(3).optional(),
+        timestamp
+      }),
+      /** A connection the agent refused (ban, server locked, missing account, name). */
+      z.object({ type: z.literal("refused"), name: z.string().max(100), reason: z.string().max(300), identifiers: list(z.string().max(120), 30), timestamp })
     ]),
     300
   ),
@@ -172,18 +179,62 @@ export async function playerOfSession(serverId: string, session: string | undefi
   return row?.player_id ?? null;
 }
 
-async function detected(serverId: string, e: Extract<AgentRequest["events"][number], { type: "detection" }>): Promise<void> {
+const playerUrl = (serverId: string, playerId: number | null) =>
+  playerId ? `${(process.env.APP_URL || "").replace(/\/+$/, "")}/s/${serverId}/players/${playerId}` : null;
+
+/**
+ * A detection from the agent: recorded (a "ban" one bans the player), escalated when the player's detections add
+ * up (settings "strikes"), and posted to the alert webhook.
+ */
+async function detected(serverId: string, e: Extract<AgentRequest["events"][number], { type: "detection" }>, settings: AnticheatSettings): Promise<void> {
   const playerId = await playerOfSession(serverId, e.session);
-  await recordDetection(serverId, { playerId, playerName: e.name || "?", kind: e.kind, details: e.details ?? {}, action: e.action }, new Date(e.timestamp * 1000));
+  const at = new Date(e.timestamp * 1000);
+  const details = { ...(e.details ?? {}), ...(e.pos ? { pos: e.pos.map((v) => Math.round(v)) } : {}) };
+  await recordDetection(serverId, { playerId, playerName: e.name || "?", kind: e.kind, details, action: e.action }, at, {
+    source: "anticheat", reason: `Anticheat : ${detectionLabel(e.kind)}`, expiresAt: banExpiry(settings.banHours, at)
+  });
+  let action: "log" | "kick" | "ban" = e.action === "off" ? "log" : e.action;
+  let note: string | null = null;
+
+  const { strikes } = settings;
+  if (strikes.enabled && playerId && e.action !== "ban") {
+    const count = await countStrikes(serverId, playerId, strikes.windowHours, at);
+    const escalate = strikes.banAt > 0 && count >= strikes.banAt ? "ban" : strikes.kickAt > 0 && count === strikes.kickAt ? "kick" : null;
+    if (escalate === "ban" && !(await hasActiveBan(serverId, playerId, at))) {
+      await banPlayer(serverId, SYSTEM_ACTOR, { playerId, reason: `Anticheat : ${count} détections en ${strikes.windowHours} h`, source: "anticheat", expiresAt: banExpiry(settings.banHours, at) }, at);
+    }
+    if (escalate) {
+      action = escalate;
+      note = `Cumul : ${count} détections en ${strikes.windowHours} h → ${escalate === "ban" ? "ban" : "kick"}`;
+      const live = await getLiveState(serverId);
+      const target = live.players.find((p) => p.playerId === playerId);
+      if (target) {
+        const reason = escalate === "ban" ? settings.banMessage : `Anticheat : ${count} détections en ${strikes.windowHours} h.`;
+        await enqueueCommand(serverId, SYSTEM_ACTOR, "kick", { target: target.id, reason }, { playerName: target.name, targetDiscordId: target.discordId });
+      }
+    }
+  }
+  const server = await getServer(serverId);
+  await sendAnticheatAlert(settings, server?.name ?? serverId, { kind: e.kind, action, playerName: e.name || "?", details, url: playerUrl(serverId, playerId), note });
+}
+
+async function refused(serverId: string, e: Extract<AgentRequest["events"][number], { type: "refused" }>): Promise<void> {
+  const { license } = parseIdentifiers(e.identifiers);
+  const player = license ? await db.get<{ id: number }>("SELECT id FROM players WHERE server_id = ? AND license = ?", [serverId, license]) : undefined;
+  await recordDetection(serverId, {
+    playerId: player?.id ?? null, playerName: e.name || "?", kind: "connection_refused", details: { reason: e.reason, license: license ?? undefined }, action: "log"
+  }, new Date(e.timestamp * 1000));
 }
 
 /** Handle one call of a server's agent and hand it the queued actions. */
 export async function handleAgentCall(serverId: string, req: AgentRequest, now = new Date()): Promise<AgentResponse> {
   if (req.boot) await closeOpenSessions(serverId, now);
+  const anticheat = req.events.some((e) => e.type === "detection") ? (await getSecuritySettings(serverId)).anticheat : null;
   for (const e of req.events) {
     if (e.type === "join") await playerJoined(serverId, e);
     else if (e.type === "leave") await playerLeft(serverId, e);
-    else await detected(serverId, e);
+    else if (e.type === "refused") await refused(serverId, e);
+    else await detected(serverId, e, anticheat as AnticheatSettings);
   }
 
   const writes: Stmt[] = [
@@ -253,6 +304,9 @@ export const COMMANDS = {
   },
   refresh: { permission: "resources", schema: z.object({}) },
   screenshot: { permission: "screenshot", schema: z.object({ target }) },
+  /** Stream the player's screen while the panel watches it. */
+  screen: { permission: "screenshot", schema: z.object({ target }) },
+  freeze: { permission: "player_kick", schema: z.object({ target, on: z.boolean() }) },
   console: { permission: "console", schema: z.object({ command: text(500) }) }
 } satisfies Record<string, { permission: Permission; schema: z.ZodTypeAny }>;
 
@@ -266,6 +320,8 @@ const AUDIT_ACTION: Record<CommandKind, string> = {
   resource: "resource",
   refresh: "resource",
   screenshot: "player_screenshot",
+  screen: "player_screen",
+  freeze: "player_freeze",
   console: "console_command"
 };
 

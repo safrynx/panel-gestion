@@ -13,6 +13,11 @@ AddEventHandler('onClientResourceStart', function(name)
     TriggerServerEvent('fiverax:ac:resource', name)
 end)
 
+-- A resource stopping here while it keeps running on the server: the server decides whether it is suspicious.
+AddEventHandler('onClientResourceStop', function(name)
+    if name ~= GetCurrentResourceName() then TriggerServerEvent('fiverax:ac:resstop', name) end
+end)
+
 local function zoneLabel(coords)
     local zone = GetLabelText(GetNameOfZone(coords.x, coords.y, coords.z))
     local street = GetStreetNameFromHashKey(GetStreetNameAtCoord(coords.x, coords.y, coords.z))

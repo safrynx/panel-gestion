@@ -1,19 +1,24 @@
 "use client";
 import { useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { Ban, Camera, Car, Locate, Mic, Phone, Radio as RadioIcon, UserX, ZoomIn, ZoomOut } from "lucide-react";
+import { Ban, Camera, Car, Locate, Mic, Monitor, Phone, Radio as RadioIcon, Snowflake, UserX, ZoomIn, ZoomOut } from "lucide-react";
 import type { LivePlayer, LiveState } from "@/lib/agent";
+import { detectionLabel } from "@/lib/security-config";
+import type { MapDetection } from "@/lib/security-live";
 import { useServerPaths, useUI } from "@/app/ui";
 import { useCommand, usePolling } from "../use-command";
 import { AgentBanner } from "../live/live-view";
 import { useBanDialog } from "../security-actions";
+import ScreenViewer from "../screen-viewer";
 
 type Props = {
   initial: LiveState;
   /** Background: the usual 8192 px GTA V atlas (MAP_IMAGE_URL); without it, a grid with the main places. */
   mapImage: string | null;
   settingsHref: string | null;
-  can: { screenshot: boolean; kick: boolean; ban: boolean };
+  can: { screenshot: boolean; kick: boolean; ban: boolean; security: boolean };
+  /** Anticheat detections of the last 30 min with a position. */
+  detections: MapDetection[];
 };
 
 /** Game coordinates -> map units (0-1000), calibrated on the standard GTA V atlas. */
@@ -29,12 +34,16 @@ const PLACES: [string, number, number][] = [
 
 const INITIAL_VIEW: [number, number, number, number] = [110, 20, 740, 960];
 
-export default function MapView({ initial, mapImage, settingsHref, can }: Props) {
+export default function MapView({ initial, mapImage, settingsHref, can, detections: initialDetections }: Props) {
   const paths = useServerPaths();
   const { ask } = useUI();
   const { send, busy } = useCommand();
   const { ban } = useBanDialog();
   const { data: live } = usePolling<LiveState>(paths.api("live"), initial, 2000);
+  const { data: detections } = usePolling<MapDetection[]>(can.security ? paths.api("detections") : "", initialDetections, can.security ? 10_000 : 3_600_000);
+  const [showDetections, setShowDetections] = useState(true);
+  const [screen, setScreen] = useState<LivePlayer | null>(null);
+  const [frozen, setFrozen] = useState<Set<number>>(new Set());
   const [view, setView] = useState(INITIAL_VIEW);
   const [selected, setSelected] = useState<number | null>(null);
   const [tab, setTab] = useState<"players" | "voice">("players");
@@ -79,6 +88,16 @@ export default function MapView({ initial, mapImage, settingsHref, can }: Props)
   // ---- actions ----
   async function screenshot(p: LivePlayer) {
     await send("screenshot", { target: p.id }, `Capture de ${p.name} envoyée à l'analyse (onglet Captures IA de l'anticheat)`);
+  }
+  async function freeze(p: LivePlayer) {
+    const on = !frozen.has(p.id);
+    if (await send("freeze", { target: p.id, on }, on ? `${p.name} est gelé` : `${p.name} est dégelé`)) {
+      setFrozen((prev) => {
+        const next = new Set(prev);
+        if (on) next.add(p.id); else next.delete(p.id);
+        return next;
+      });
+    }
   }
   async function kick(p: LivePlayer) {
     const answer = await ask({ title: `Kick ${p.name}`, message: "Le joueur est déconnecté avec ce message.", confirmLabel: "Kick", danger: true, input: { label: "Raison", required: true } });
@@ -133,6 +152,16 @@ export default function MapView({ initial, mapImage, settingsHref, can }: Props)
                 })}
               </g>
             )}
+            {can.security && showDetections && detections.map((d) => {
+              const [mx, my] = toMap(d.pos[0], d.pos[1]);
+              return (
+                <g key={`d${d.id}`} transform={`translate(${mx} ${my})`}>
+                  <title>{`${detectionLabel(d.kind)} · ${d.playerName} · ${new Date(d.at).toLocaleTimeString("fr-FR")}`}</title>
+                  <circle r={r * 2.6} className="map-det-ring" strokeWidth={r * 0.25} />
+                  <path d={`M${-r} ${-r} L${r} ${r} M${r} ${-r} L${-r} ${r}`} className="map-det" strokeWidth={r * 0.55} stroke="var(--bad)" />
+                </g>
+              );
+            })}
             {placed.map((p) => {
               const [mx, my] = toMap(p.pos![0], p.pos![1]);
               const isSel = p.id === selected;
@@ -151,6 +180,11 @@ export default function MapView({ initial, mapImage, settingsHref, can }: Props)
             <button className="ibtn" title="Dézoomer" onClick={() => zoom(1.4)}><ZoomOut size={14} /></button>
             <button className="ibtn" title="Vue d'ensemble" onClick={() => setView(INITIAL_VIEW)}><Locate size={14} /></button>
           </div>
+          {can.security && (
+            <label className="check map-toggle">
+              <input type="checkbox" checked={showDetections} onChange={(e) => setShowDetections(e.target.checked)} />Détections (30 min) · {detections.length}
+            </label>
+          )}
           {!mapImage && <div className="map-hint">Fond de carte : ajoute <code>MAP_IMAGE_URL</code> (atlas GTA V 8192 px) aux variables du site.</div>}
         </div>
 
@@ -175,7 +209,9 @@ export default function MapView({ initial, mapImage, settingsHref, can }: Props)
               </div>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                 {current.pos && <button className="btn" onClick={() => focus(current)}><Locate size={14} />Centrer</button>}
+                {can.screenshot && <button className="btn" onClick={() => setScreen(current)}><Monitor size={14} />Écran</button>}
                 {can.screenshot && <button className="btn" disabled={busy} onClick={() => screenshot(current)}><Camera size={14} />Capture</button>}
+                {can.kick && <button className="btn" disabled={busy} onClick={() => freeze(current)}><Snowflake size={14} />{frozen.has(current.id) ? "Dégeler" : "Geler"}</button>}
                 {can.kick && <button className="btn" disabled={busy} onClick={() => kick(current)}><UserX size={14} />Kick</button>}
                 {can.ban && current.playerId && <button className="btn danger" onClick={() => ban(current.playerId as number, current.name)}><Ban size={14} />Ban</button>}
               </div>
@@ -214,6 +250,7 @@ export default function MapView({ initial, mapImage, settingsHref, can }: Props)
           )}
         </aside>
       </div>
+      {screen && <ScreenViewer target={screen.id} name={screen.name} onClose={() => setScreen(null)} />}
     </>
   );
 }

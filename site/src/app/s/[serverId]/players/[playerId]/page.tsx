@@ -5,6 +5,7 @@ import { getLiveState } from "@/lib/agent";
 import { getPlayer } from "@/lib/players";
 import { isBanActive, listBans, listDetections, listScreenshots } from "@/lib/security";
 import { detectionLabel } from "@/lib/security-config";
+import { linkedAccounts } from "@/lib/security-live";
 import { formatDateTime, formatDuration } from "@/lib/format";
 import Shell from "@/app/shell";
 import CopyButton from "@/app/copy-button";
@@ -23,12 +24,13 @@ export default async function PlayerPage({ params }: { params: Promise<{ serverI
   const id = Number(playerId);
   if (!Number.isInteger(id) || id <= 0) notFound();
   const security = can(user, "view_security");
-  const [player, live, bans, detections, shots] = await Promise.all([
+  const [player, live, bans, detections, shots, linked] = await Promise.all([
     getPlayer(server.id, id),
     getLiveState(server.id),
     security ? listBans(server.id, { playerId: id, limit: 20 }) : Promise.resolve([]),
     security ? listDetections(server.id, { playerId: id, limit: 30 }) : Promise.resolve([]),
-    security ? listScreenshots(server.id, { playerId: id, limit: 12 }) : Promise.resolve([])
+    security ? listScreenshots(server.id, { playerId: id, limit: 12 }) : Promise.resolve([]),
+    security ? linkedAccounts(server.id, id) : Promise.resolve([])
   ]);
   if (!player) notFound();
   const activeBan = bans.find((b) => isBanActive(b)) ?? null;
@@ -106,6 +108,23 @@ export default async function PlayerPage({ params }: { params: Promise<{ serverI
                 </li>
               ))}
             </ul>
+            {linked.length > 0 && (
+              <div style={{ marginTop: 18 }}>
+                <div className="eyebrow" style={{ marginBottom: 6 }}>Comptes liés · {linked.length}</div>
+                <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
+                  {linked.map((l) => (
+                    <li key={l.id} style={{ display: "flex", justifyContent: "space-between", gap: 12, padding: "9px 0", borderBottom: "1px solid var(--line)" }}>
+                      <Link href={`/s/${server.id}/players/${l.id}`} style={{ fontWeight: 600 }}>{l.name}</Link>
+                      <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+                        <span className="muted" style={{ fontSize: 12 }}>même {l.shared.join(", ")}</span>
+                        {l.banned && <span className="tag" data-tone="danger">banni</span>}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+                <p className="muted" style={{ fontSize: 12 }}>Même PC (identifiants matériels) ou même compte Discord / Steam : double compte, contournement de ban ou PC partagé.</p>
+              </div>
+            )}
             {shots.length > 0 && (
               <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))", marginTop: 14 }}>
                 {shots.map((s) => (

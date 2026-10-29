@@ -20,20 +20,39 @@ import { sitePost } from "./api";
 type Rule = { enabled: boolean; max: number; windowSec: number };
 export type RuleKey =
   | "role_delete" | "channel_delete" | "role_create" | "channel_create" | "member_role_remove" | "member_role_add" | "dangerous_role_add"
-  | "role_permissions" | "ban" | "kick" | "prune" | "bot_add" | "webhook_create" | "guild_update";
+  | "role_permissions" | "ban" | "kick" | "prune" | "bot_add" | "webhook_create" | "guild_update" | "protected_role" | "channel_update";
+
+export type MessageProtection = {
+  enabled: boolean; floodCount: number; floodSeconds: number; maxMentions: number; blockEveryone: boolean; blockInvites: boolean;
+  blockLinks: boolean; ignoredRoles: string[]; ignoredChannels: string[];
+};
 
 export type AntiraidConfig = {
   enabled: boolean;
-  punishment: "derank" | "kick" | "ban";
+  punishment: "derank" | "quarantine" | "timeout" | "kick" | "ban";
   trustOwner: boolean;
   trusted: string[];
   alertChannelId: string | null;
   rules: Partial<Record<RuleKey, Rule>>;
   joinRaid: { enabled: boolean; joins: number; windowSec: number; lockdownMinutes: number };
   minAccountAgeDays: number;
+  quarantineRoleId?: string | null;
+  timeoutMinutes?: number;
+  protectedRoles?: string[];
+  protectedChannels?: string[];
+  alertOwnerDm?: boolean;
+  backupEveryHours?: number;
+  messages?: MessageProtection;
 };
 
 const configs = new Map<string, AntiraidConfig>();
+
+export const getAntiraidConfig = (guildId: string) => configs.get(guildId);
+
+/** Never watched: the bot itself, trusted people, and the owner when the settings say so. */
+export function isTrusted(guild: Guild, config: AntiraidConfig, userId: string): boolean {
+  return userId === guild.client.user.id || config.trusted.includes(userId) || (config.trustOwner && userId === guild.ownerId);
+}
 
 export function setAntiraidConfig(guildId: string, config: unknown): void {
   if (config && typeof config === "object" && "enabled" in config) configs.set(guildId, config as AntiraidConfig);
@@ -89,7 +108,8 @@ const deletedRoles = new Map<string, DeletedRole>();
 type DeletedChannel = { channel: NonThreadGuildBasedChannel; children: string[]; at: number };
 const deletedChannels = new Map<string, DeletedChannel>();
 const recentJoins = new Map<string, { id: string; at: number }[]>();
-const lockdowns = new Map<string, { until: number; previousLevel: GuildVerificationLevel }>();
+type Lockdown = { until: number; previousLevel: GuildVerificationLevel; channels: { id: string; allow: bigint | null; deny: bigint | null }[]; timer: NodeJS.Timeout };
+const lockdowns = new Map<string, Lockdown>();
 const tracker = new Tracker();
 const punished = new Map<string, number>();
 
@@ -129,7 +149,7 @@ async function waitFor<T>(map: Map<string, T>, id: string): Promise<T | undefine
   return map.get(id);
 }
 
-const attempt = async (type: string, run: () => Promise<unknown>, detail?: string): Promise<Action> => {
+export const attempt = async (type: string, run: () => Promise<unknown>, detail?: string): Promise<Action> => {
   try {
     await run();
     return { type, ok: true, detail };
@@ -212,34 +232,52 @@ async function punish(guild: Guild, config: AntiraidConfig, executorId: string, 
   if (member.user.bot) return { actions: [await attempt("Bot expulsé", () => member.kick(reason), member.user.tag)], removedRoles: [] };
   if (config.punishment === "kick") return { actions: [await attempt("Auteur expulsé", () => member.kick(reason), member.user.tag)], removedRoles: [] };
   if (config.punishment === "ban") return { actions: [await attempt("Auteur banni", () => member.ban({ reason }), member.user.tag)], removedRoles: [] };
+  return derank(member, config, reason);
+}
 
-  // Derank: every role the bot can remove.
-  const removable = member.roles.cache.filter((r) => r.id !== guild.id && !r.managed && r.editable);
+/** Derank (every role the bot can remove), then quarantine role or mute depending on the punishment. */
+export async function derank(member: GuildMember, config: AntiraidConfig, reason: string): Promise<{ actions: Action[]; removedRoles: string[] }> {
+  const guild = member.guild;
+  const quarantine = config.punishment === "quarantine" ? config.quarantineRoleId ?? null : null;
+  const removable = member.roles.cache.filter((r) => r.id !== guild.id && r.id !== quarantine && !r.managed && r.editable);
   const kept = member.roles.cache.filter((r) => r.id !== guild.id && !r.managed && !r.editable);
   const action = await attempt("Auteur derank", () => member.roles.remove([...removable.keys()], reason), `${removable.size} rôle(s) retiré(s)`);
   const actions = [action];
   if (kept.size) actions.push({ type: "Derank incomplet", ok: false, detail: `rôles au-dessus du bot : ${kept.map((r) => r.name).join(", ")}` });
+  if (config.punishment === "quarantine") {
+    actions.push(quarantine
+      ? await attempt("Mis en quarantaine", () => member.roles.add(quarantine, reason))
+      : { type: "Quarantaine", ok: false, detail: "aucun rôle de quarantaine choisi dans les réglages" });
+  }
+  if (config.punishment === "timeout") {
+    const minutes = config.timeoutMinutes ?? 60;
+    actions.push(await attempt("Exclu temporairement", () => member.timeout(minutes * 60_000, reason), `${minutes} min`));
+  }
   return { actions, removedRoles: action.ok ? [...removable.keys()] : [] };
 }
 
 // ---- reporting ----
 
-async function report(guild: Guild, config: AntiraidConfig, incident: { kind: string; actorId: string | null; actorName: string | null; actorBot: boolean; summary: string; details?: Record<string, unknown>; actions: Action[]; removedRoles?: string[] }) {
+export type Incident = { kind: string; actorId: string | null; actorName: string | null; actorBot: boolean; summary: string; details?: Record<string, unknown>; actions: Action[]; removedRoles?: string[] };
+
+/** Send the incident to the panel, the alert channel and (setting) the owner's DMs. */
+export async function report(guild: Guild, config: AntiraidConfig, incident: Incident) {
   console.log(`[antiraid] ${guild.name}: ${incident.kind} by ${incident.actorName ?? "?"} — ${incident.summary}`);
-  void sitePost("incident", { guildId: guild.id, details: {}, removedRoles: [], ...incident }, 2);
-  if (!config.alertChannelId) return;
-  const channel = guild.channels.cache.get(config.alertChannelId);
-  if (!channel || !channel.isTextBased()) return;
+  void sitePost("incident", { guildId: guild.id, details: {}, removedRoles: [], ...incident, actions: incident.actions.slice(0, 200) }, 2);
   const lines = incident.actions.slice(0, 12).map((a) => `${a.ok ? "✅" : "❌"} ${a.type}${a.detail ? ` — ${a.detail}` : ""}`);
-  await channel.send({
-    embeds: [{
-      title: "🛡️ Anti-raid",
-      description: `**${incident.summary}**\nAuteur : ${incident.actorId ? `<@${incident.actorId}>` : "?"}${incident.actorBot ? " (bot)" : ""}\n\n${lines.join("\n")}`.slice(0, 4000),
-      color: 0xd4b06a,
-      timestamp: new Date().toISOString()
-    }],
-    allowedMentions: { parse: [] }
-  }).catch(() => undefined);
+  const embed = {
+    title: "🛡️ Anti-raid",
+    description: `**${incident.summary}**\nAuteur : ${incident.actorId ? `<@${incident.actorId}>` : "?"}${incident.actorBot ? " (bot)" : ""}\n\n${lines.join("\n")}`.slice(0, 4000),
+    color: 0xd4b06a,
+    footer: { text: guild.name },
+    timestamp: new Date().toISOString()
+  };
+  const channel = config.alertChannelId ? guild.channels.cache.get(config.alertChannelId) : undefined;
+  if (channel?.isTextBased()) await channel.send({ embeds: [embed], allowedMentions: { parse: [] } }).catch(() => undefined);
+  if (config.alertOwnerDm) {
+    const owner = await guild.fetchOwner().catch(() => null);
+    await owner?.send({ embeds: [embed] }).catch(() => undefined);
+  }
 }
 
 // ---- the audit log ----
@@ -248,29 +286,50 @@ const LABELS: Record<RuleKey, string> = {
   role_delete: "suppression de rôle", channel_delete: "suppression de salon", role_create: "création de rôles en masse",
   channel_create: "création de salons en masse", member_role_remove: "retrait de rôles en masse", member_role_add: "ajout de rôles en masse",
   dangerous_role_add: "rôle dangereux donné", role_permissions: "permissions dangereuses ajoutées à un rôle", ban: "bans en masse",
-  kick: "kicks en masse", prune: "purge de membres", bot_add: "ajout d'un bot", webhook_create: "création de webhooks", guild_update: "modification du serveur"
+  kick: "kicks en masse", prune: "purge de membres", bot_add: "ajout d'un bot", webhook_create: "création de webhooks", guild_update: "modification du serveur",
+  protected_role: "rôle protégé modifié", channel_update: "permissions de salons modifiées en masse"
 };
+
+type Classified = { rule: RuleKey; label: string; undo: (() => Promise<Action>) | null; protectedHit?: boolean };
 
 type Change = { key: string; old?: unknown; new?: unknown };
 const rolesOf = (changes: Change[], key: "$add" | "$remove") => (changes.find((c) => c.key === key)?.new as { id: string; name: string }[] | undefined) ?? [];
 
 /** What one audit entry means: the rule(s) it counts for, and how to undo it. */
-function classify(guild: Guild, entry: GuildAuditLogsEntry, reason: string): { rule: RuleKey; label: string; undo: (() => Promise<Action>) | null }[] {
+function classify(guild: Guild, config: AntiraidConfig, entry: GuildAuditLogsEntry, reason: string): Classified[] {
   const target = entry.targetId ?? "";
   const changes = (entry.changes ?? []) as Change[];
+  const protectedRoles = new Set(config.protectedRoles ?? []);
   switch (entry.action) {
     case AuditLogEvent.RoleDelete:
-      return [{ rule: "role_delete", label: "rôle supprimé", undo: undoRoleDelete(guild, target, reason) }];
+      return [{ rule: "role_delete", label: "rôle supprimé", undo: undoRoleDelete(guild, target, reason), protectedHit: protectedRoles.has(target) }];
     case AuditLogEvent.ChannelDelete:
-      return [{ rule: "channel_delete", label: "salon supprimé", undo: undoChannelDelete(guild, target, reason) }];
+      return [{ rule: "channel_delete", label: "salon supprimé", undo: undoChannelDelete(guild, target, reason), protectedHit: (config.protectedChannels ?? []).includes(target) }];
+    case AuditLogEvent.ChannelUpdate:
+    case AuditLogEvent.ChannelOverwriteCreate:
+    case AuditLogEvent.ChannelOverwriteUpdate:
+    case AuditLogEvent.ChannelOverwriteDelete:
+      return [{ rule: "channel_update", label: "salon modifié", undo: null, protectedHit: (config.protectedChannels ?? []).includes(target) }];
     case AuditLogEvent.RoleCreate:
       return [{ rule: "role_create", label: "rôle créé", undo: () => attempt("Rôle créé supprimé", async () => { await guild.roles.cache.get(target)?.delete(reason); }) }];
     case AuditLogEvent.ChannelCreate:
       return [{ rule: "channel_create", label: "salon créé", undo: () => attempt("Salon créé supprimé", async () => { await guild.channels.cache.get(target)?.delete(reason); }) }];
     case AuditLogEvent.MemberRoleUpdate: {
-      const out: ReturnType<typeof classify> = [];
+      const out: Classified[] = [];
       const removed = rolesOf(changes, "$remove");
       const added = rolesOf(changes, "$add");
+      const pAdded = added.filter((r) => protectedRoles.has(r.id));
+      const pRemoved = removed.filter((r) => protectedRoles.has(r.id));
+      if (pAdded.length || pRemoved.length) {
+        out.push({
+          rule: "protected_role", label: "rôle protégé", protectedHit: true,
+          undo: () => attempt("Rôle protégé remis en état", async () => {
+            const m = await guild.members.fetch(target);
+            if (pAdded.length) await m.roles.remove(pAdded.map((r) => r.id), reason);
+            if (pRemoved.length) await m.roles.add(pRemoved.map((r) => r.id), reason);
+          }, `<@${target}> : ${[...pAdded, ...pRemoved].map((r) => r.name).join(", ")}`)
+        });
+      }
       if (removed.length) {
         out.push({ rule: "member_role_remove", label: "rôles retirés", undo: () => attempt("Rôles remis", () => guild.members.cache.get(target)?.roles.add(removed.map((r) => r.id), reason) ?? guild.members.fetch(target).then((m) => m.roles.add(removed.map((r) => r.id), reason)), `<@${target}> : ${removed.map((r) => r.name).join(", ")}`) });
       }
@@ -284,6 +343,10 @@ function classify(guild: Guild, entry: GuildAuditLogsEntry, reason: string): { r
       return out;
     }
     case AuditLogEvent.RoleUpdate: {
+      if (protectedRoles.has(target)) {
+        const old = Object.fromEntries(changes.filter((c) => ["name", "color", "hoist", "mentionable", "permissions"].includes(c.key)).map((c) => [c.key, c.key === "permissions" ? BigInt(String(c.old ?? "0")) : c.old]));
+        return [{ rule: "protected_role", label: "rôle protégé modifié", protectedHit: true, undo: () => attempt("Rôle protégé remis en état", async () => { await guild.roles.cache.get(target)?.edit({ ...old, reason }); }, guild.roles.cache.get(target)?.name) }];
+      }
       const perms = changes.find((c) => c.key === "permissions");
       if (!perms || !addedDangerous(String(perms.old ?? "0"), String(perms.new ?? "0"))) return [];
       return [{ rule: "role_permissions", label: "permissions dangereuses ajoutées", undo: () => attempt("Permissions du rôle remises", async () => { await guild.roles.cache.get(target)?.setPermissions(BigInt(String(perms.old ?? "0")), reason); }, guild.roles.cache.get(target)?.name) }];
@@ -311,12 +374,13 @@ function classify(guild: Guild, entry: GuildAuditLogsEntry, reason: string): { r
 async function onAuditEntry(entry: GuildAuditLogsEntry, guild: Guild): Promise<void> {
   const config = configs.get(guild.id);
   const executorId = entry.executorId;
-  if (!config?.enabled || !executorId || executorId === guild.client.user.id) return;
-  if (config.trusted.includes(executorId) || (config.trustOwner && executorId === guild.ownerId)) return;
+  if (!config?.enabled || !executorId || isTrusted(guild, config, executorId)) return;
 
   const reason = "Fiverax anti-raid : action annulée";
-  for (const item of classify(guild, entry, reason)) {
-    const rule = config.rules[item.rule];
+  for (const item of classify(guild, config, entry, reason)) {
+    const base = config.rules[item.rule];
+    // A protected role or channel triggers at once, even when the rule itself is off.
+    const rule = item.protectedHit ? { enabled: true, max: 0, windowSec: base?.windowSec ?? 60 } : base;
     if (!rule?.enabled) continue;
     const { triggered, firstTrigger, toUndo } = tracker.push(`${guild.id}:${executorId}:${item.rule}`, rule, { at: Date.now(), undo: item.undo, label: item.label });
     if (!triggered) continue;
@@ -357,7 +421,7 @@ async function onJoin(member: GuildMember): Promise<void> {
   const lock = lockdowns.get(guild.id);
 
   if (lock && lock.until > now) {
-    await member.kick("Fiverax anti-raid : serveur verrouillé (raid en cours)").catch(() => undefined);
+    await member.kick("Fiverax anti-raid : serveur verrouillé").catch(() => undefined);
     return;
   }
 
@@ -376,24 +440,68 @@ async function onJoin(member: GuildMember): Promise<void> {
 
   // Raid: lock the guild down and kick everyone who came in the window.
   recentJoins.set(guild.id, []);
-  const previousLevel = guild.verificationLevel;
-  lockdowns.set(guild.id, { until: now + config.joinRaid.lockdownMinutes * 60_000, previousLevel });
-  const actions: Action[] = [await attempt("Vérification au maximum", () => guild.setVerificationLevel(GuildVerificationLevel.VeryHigh, "Fiverax anti-raid : raid de comptes"))];
+  const actions = await startLockdown(guild, config.joinRaid.lockdownMinutes, false, "raid de comptes");
   let kicked = 0;
   for (const j of recent) {
     if (await guild.members.kick(j.id, "Fiverax anti-raid : raid de comptes").then(() => true, () => false)) kicked++;
   }
   actions.push({ type: "Arrivants expulsés", ok: true, detail: `${kicked}/${recent.length}` });
-  actions.push({ type: "Verrouillage", ok: true, detail: `${config.joinRaid.lockdownMinutes} min : chaque nouvel arrivant est expulsé` });
   await report(guild, config, { kind: "join_raid", actorId: null, actorName: null, actorBot: false, summary: `${recent.length} arrivées en ${config.joinRaid.windowSec} s`, details: { joins: recent.length }, actions });
+}
 
-  setTimeout(async () => {
-    const current = lockdowns.get(guild.id);
-    if (!current || current.until > Date.now() + 1000) return;
-    lockdowns.delete(guild.id);
-    const restore = await attempt("Vérification remise", () => guild.setVerificationLevel(previousLevel, "Fiverax anti-raid : fin du verrouillage"));
-    await report(guild, config, { kind: "lockdown_end", actorId: null, actorName: null, actorBot: false, summary: "Fin du verrouillage", actions: [restore] });
-  }, config.joinRaid.lockdownMinutes * 60_000);
+/**
+ * Lock the guild: highest verification level, every newcomer kicked and, with `lockChannels`, @everyone may no longer
+ * write in any text channel. Ends by itself after `minutes` (or with endLockdown).
+ */
+export async function startLockdown(guild: Guild, minutes: number, lockChannels: boolean, why: string): Promise<Action[]> {
+  const reason = `Fiverax anti-raid : ${why}`;
+  const current = lockdowns.get(guild.id);
+  if (current) clearTimeout(current.timer);
+  const previousLevel = current?.previousLevel ?? guild.verificationLevel;
+  const actions: Action[] = [await attempt("Vérification au maximum", () => guild.setVerificationLevel(GuildVerificationLevel.VeryHigh, reason))];
+  const channels = current?.channels ?? [];
+  if (lockChannels && !channels.length) {
+    let closed = 0;
+    for (const c of guild.channels.cache.values()) {
+      if (c.type !== ChannelType.GuildText && c.type !== ChannelType.GuildAnnouncement && c.type !== ChannelType.GuildForum) continue;
+      const o = c.permissionOverwrites.cache.get(guild.id);
+      const ok = await c.permissionOverwrites.edit(guild.id, { SendMessages: false, SendMessagesInThreads: false, CreatePublicThreads: false, AddReactions: false }, { reason }).then(() => true, () => false);
+      if (ok) {
+        channels.push({ id: c.id, allow: o?.allow.bitfield ?? null, deny: o?.deny.bitfield ?? null });
+        closed++;
+      }
+    }
+    actions.push({ type: "Salons fermés", ok: true, detail: `${closed} salon(s) en lecture seule pour @everyone` });
+  }
+  const timer = setTimeout(() => void endLockdown(guild, "fin du verrouillage"), minutes * 60_000);
+  lockdowns.set(guild.id, { until: Date.now() + minutes * 60_000, previousLevel, channels, timer });
+  actions.push({ type: "Verrouillage", ok: true, detail: `${minutes} min : chaque nouvel arrivant est expulsé` });
+  return actions;
+}
+
+export async function endLockdown(guild: Guild, why: string): Promise<Action[]> {
+  const lock = lockdowns.get(guild.id);
+  if (!lock) return [{ type: "Déverrouillage", ok: false, detail: "le serveur n'était pas verrouillé" }];
+  clearTimeout(lock.timer);
+  lockdowns.delete(guild.id);
+  const reason = `Fiverax anti-raid : ${why}`;
+  const actions: Action[] = [await attempt("Vérification remise", () => guild.setVerificationLevel(lock.previousLevel, reason))];
+  let reopened = 0;
+  for (const saved of lock.channels) {
+    const c = guild.channels.cache.get(saved.id);
+    if (!c || !("permissionOverwrites" in c)) continue;
+    const ok = saved.allow === null
+      ? await c.permissionOverwrites.delete(guild.id, reason).then(() => true, () => false)
+      : await c.permissionOverwrites.create(guild.id, Object.fromEntries([
+          ...new PermissionsBitField(saved.allow).toArray().map((p) => [p, true]),
+          ...new PermissionsBitField(saved.deny ?? 0n).toArray().map((p) => [p, false])
+        ]), { reason }).then(() => true, () => false);
+    if (ok) reopened++;
+  }
+  if (lock.channels.length) actions.push({ type: "Salons rouverts", ok: reopened === lock.channels.length, detail: `${reopened}/${lock.channels.length}` });
+  const config = configs.get(guild.id);
+  if (config) await report(guild, config, { kind: "lockdown_end", actorId: null, actorName: null, actorBot: false, summary: "Fin du verrouillage", actions });
+  return actions;
 }
 
 /** Wire the anti-raid on the client. `watched(guildId)`: the guild belongs to a server of the panel. */

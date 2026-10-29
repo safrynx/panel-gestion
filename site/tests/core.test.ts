@@ -40,6 +40,7 @@ type Mods = {
   security: typeof import("../src/lib/security");
   securityConfig: typeof import("../src/lib/security-config");
   vision: typeof import("../src/lib/vision");
+  live: typeof import("../src/lib/security-live");
 };
 let m: Mods;
 let db: Mods["db"]["db"];
@@ -68,7 +69,8 @@ before(async () => {
     players: await import("../src/lib/players"),
     security: await import("../src/lib/security"),
     securityConfig: await import("../src/lib/security-config"),
-    vision: await import("../src/lib/vision")
+    vision: await import("../src/lib/vision"),
+    live: await import("../src/lib/security-live")
   };
   db = m.db.db;
 });
@@ -458,7 +460,7 @@ test("database: batches are atomic, migrations are idempotent and safe to run co
   const before = (await client.execute("SELECT COUNT(*) AS n FROM schema_migrations")).rows[0].n;
   await Promise.all([runMigrations(client), runMigrations(client)]);
   assert.equal((await client.execute("SELECT COUNT(*) AS n FROM schema_migrations")).rows[0].n, before);
-  assert.equal(Number(before), 16);
+  assert.equal(Number(before), 17);
 });
 
 test("bot API: sync snapshot, member event, voice events, heartbeat, playtime, shutdown", async () => {
@@ -1052,4 +1054,114 @@ test("anti-raid incidents: stored per guild, recreated roles keep the panel's gr
   assert.equal(guilds.find((g) => g.guildId === guild)?.antiraid.enabled, false);
   const beat = await api.recordHeartbeat({ guilds: [{ guildId: guild }] });
   assert.ok(guild in beat.antiraid);
+});
+
+// ---- security, part 2: escalation, alerts, connections, live screen, bot actions, backups ----
+
+const SEC2 = "sec2-srv";
+
+test("anticheat settings: new sections have safe defaults; webhook URLs are checked", () => {
+  const d = m.securityConfig.DEFAULT_ANTICHEAT;
+  assert.deepEqual([d.banHours, d.strikes.enabled, d.alerts.webhookUrl, d.connection.locked, d.connection.whitelist], [0, false, null, false, []]);
+  assert.equal(m.securityConfig.anticheatSchema.safeParse({ alerts: { webhookUrl: "https://evil.example/hook" } }).success, false);
+  assert.equal(m.securityConfig.anticheatSchema.safeParse({ alerts: { webhookUrl: "https://discord.com/api/webhooks/123/abc-DEF_9" } }).success, true);
+  const r = m.securityConfig.DEFAULT_ANTIRAID;
+  assert.deepEqual([r.messages.enabled, r.protectedRoles, r.backupEveryHours, r.rules.protected_role.max], [false, [], 12, 0]);
+});
+
+test("alerts: only from the chosen level, AI cheats always when asked", async () => {
+  const { shouldAlert } = await import("../src/lib/alerts");
+  const s = m.securityConfig.anticheatSchema.parse({ alerts: { webhookUrl: "https://discord.com/api/webhooks/1/x", minAction: "kick" } });
+  assert.equal(shouldAlert(s, { kind: "godmode", action: "log" }), false);
+  assert.equal(shouldAlert(s, { kind: "godmode", action: "ban" }), true);
+  assert.equal(shouldAlert(s, { kind: "ai_screenshot", action: "log" }), true);
+  assert.equal(shouldAlert(m.securityConfig.DEFAULT_ANTICHEAT, { kind: "godmode", action: "ban" }), false); // no webhook
+});
+
+test("anticheat: detections keep their position, refused connections are logged, bans follow banHours, strikes escalate", async () => {
+  const t = ts();
+  const settings = m.securityConfig.anticheatSchema.parse({ banHours: 48, strikes: { enabled: true, windowHours: 24, kickAt: 2, banAt: 3 } });
+  await m.security.saveSecuritySettings(SEC2, { discordId: A }, "anticheat", settings);
+  await agentCall(SEC2, {
+    events: [{ type: "join", session: "z1", name: "Zap", identifiers: ["license:zap"], tokens: ["2:pc"], timestamp: t }],
+    state: { hostname: "h", maxClients: 8, uptime: 1, players: [{ id: 4, name: "Zap", session: "z1", ping: 30 }], resources: [] }
+  });
+  // 1st detection: recorded with its position; 2nd: kick (strike 2); 3rd: ban for 48 h.
+  const det = (n: number) => ({ type: "detection", session: "z1", name: "Zap", kind: "speedhack", action: "log", details: { n }, pos: [100.4, -200.6, 30], timestamp: t + n });
+  await agentCall(SEC2, { events: [det(1)] });
+  const [first] = await m.security.listDetections(SEC2);
+  assert.deepEqual(first.details.pos, [100, -201, 30]);
+  assert.equal((await m.live.recentDetectionsWithPosition(SEC2)).length, 1);
+
+  const second = await agentCall(SEC2, { events: [det(2)] });
+  assert.deepEqual(second.commands.map((c) => [c.kind, c.payload.target]), [["kick", 4]]);
+  await agentCall(SEC2, { events: [det(3)] });
+  const bans = await m.security.listBans(SEC2, { active: true });
+  assert.equal(bans.length, 1);
+  assert.ok(bans[0].reason.includes("3 détections"));
+  const hours = (new Date(bans[0].expiresAt!).getTime() - (t + 3) * 1000) / 3600_000;
+  assert.ok(Math.abs(hours - 48) < 0.1, `ban of ${hours} h`);
+  await agentCall(SEC2, { events: [det(4)] });
+  assert.equal((await m.security.listBans(SEC2, { active: true })).length, 1); // not banned twice
+
+  await agentCall(SEC2, { events: [{ type: "refused", name: "Zap", reason: "banni", identifiers: ["license:zap", "ip:1.1.1.1"], timestamp: t + 10 }] });
+  const refused = (await m.security.listDetections(SEC2, { kind: "connection_refused" }))[0];
+  assert.deepEqual([refused.details.reason, refused.playerId !== null], ["banni", true]);
+});
+
+test("linked accounts: same hardware token or same Discord, banned ones first", async () => {
+  const t = ts();
+  await agentCall(SEC2, { events: [
+    { type: "join", session: "alt1", name: "ZapAlt", identifiers: ["license:zapalt"], tokens: ["2:pc"], timestamp: t },
+    { type: "join", session: "o1", name: "Other", identifiers: ["license:other", `discord:${B}`], tokens: ["9:x"], timestamp: t },
+    { type: "join", session: "o2", name: "OtherBis", identifiers: ["license:otherbis", `discord:${B}`], timestamp: t }
+  ] });
+  const players = (await m.players.listPlayers(SEC2)).rows;
+  const id = (name: string) => players.find((p) => p.name === name)!.id;
+  const linked = await m.live.linkedAccounts(SEC2, id("ZapAlt"));
+  assert.deepEqual(linked.map((l) => [l.name, l.shared, l.banned]), [["Zap", ["matériel"], true]]);
+  assert.deepEqual((await m.live.linkedAccounts(SEC2, id("Other"))).map((l) => [l.name, l.shared]), [["OtherBis", ["discord"]]]);
+});
+
+test("live screen: frames are kept while watched, the agent is told to stop otherwise", async () => {
+  const t0 = new Date();
+  assert.equal(await m.live.storeFrame(SEC2, 4, "Zap", new Uint8Array([1]), "image/jpeg", t0), false); // nobody asked
+  await m.live.watchScreen(SEC2, 4, "Zap", t0);
+  assert.equal(await m.live.storeFrame(SEC2, 4, "Zap", new Uint8Array([7, 8]), "image/jpeg", new Date(t0.getTime() + 1000)), true);
+  const frame = await m.live.readFrame(SEC2, 4, new Date(t0.getTime() + 10_000)); // refreshes the watch
+  assert.deepEqual([...frame!.image], [7, 8]);
+  assert.equal(await m.live.storeFrame(SEC2, 4, "Zap", new Uint8Array([9]), "image/jpeg", new Date(t0.getTime() + 20_000)), true);
+  assert.equal(await m.live.storeFrame(SEC2, 4, "Zap", new Uint8Array([9]), "image/jpeg", new Date(t0.getTime() + 60_000)), false);
+  assert.equal(await m.live.readFrame("other", 4), null);
+});
+
+test("bot actions: queued per guild, handed once, results stored, stale ones expire", async () => {
+  const guild = "570000000000000001";
+  const created = await m.servers.createServer({ name: "Bot Actions", guildId: guild, createdBy: A });
+  assert.ok(created.ok);
+  const id = created.server.id;
+  const t0 = new Date();
+  const lock = await m.live.enqueueBotAction(id, { discordId: A }, "lockdown", { minutes: 30, lockChannels: true }, t0);
+  const handed = await m.live.exchangeBotActions([], t0);
+  assert.deepEqual(handed.filter((a) => a.id === lock).map((a) => [a.guildId, a.kind, a.payload.minutes]), [[guild, "lockdown", 30]]);
+  assert.equal((await m.live.exchangeBotActions([], t0)).some((a) => a.id === lock), false); // only once
+  await m.live.exchangeBotActions([{ id: lock, ok: true, message: "Verrouillé" }], t0);
+  const old = await m.live.enqueueBotAction(id, { discordId: A }, "unlock", {}, new Date(t0.getTime() - 10 * 60_000));
+  await m.live.exchangeBotActions([], t0);
+  const listed = await m.live.listBotActions(id);
+  assert.deepEqual(listed.map((a) => [a.id, a.status]), [[old, "expired"], [lock, "done"]]);
+  const logs = await db.all<{ action: string }>("SELECT action FROM audit_log WHERE server_id = ?", [id]);
+  assert.ok(logs.some((l) => l.action === "discord_lockdown"));
+});
+
+test("backups: stored per server, the 15 latest kept, read back for a restore", async () => {
+  const data = { roles: [{ id: "1" }], channels: [{ id: "2" }, { id: "3" }], members: { "4": ["1"] } };
+  let last = 0;
+  for (let i = 0; i < 17; i++) last = await m.live.storeBackup(SEC2, i === 16 ? "manuelle" : "automatique", data, new Date(Date.now() + i * 1000));
+  const list = await m.live.listBackups(SEC2);
+  assert.equal(list.length, 15);
+  assert.deepEqual([list[0].id, list[0].reason, list[0].roles, list[0].channels, list[0].members], [last, "manuelle", 1, 2, 1]);
+  assert.deepEqual(await m.live.getBackupData(SEC2, last), data);
+  assert.equal(await m.live.getBackupData("other", last), null);
+  assert.ok(await m.live.lastBackupAt(SEC2));
 });
