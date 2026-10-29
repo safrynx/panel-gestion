@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { ChevronsUpDown, KeyRound, LayoutDashboard, type LucideIcon, ScrollText, Settings, TrendingUp, Users } from "lucide-react";
+import { ChevronsUpDown, Contact, KeyRound, LayoutDashboard, type LucideIcon, Radio, ScrollText, Server as ServerIcon, Settings, TrendingUp, Users } from "lucide-react";
 import { can, isOwner } from "@/lib/auth";
 import type { Server } from "@/lib/servers";
 import type { Identity, SessionUser } from "@/lib/types";
@@ -8,7 +8,7 @@ import { Mark } from "./brand";
 import LogoutButton from "./logout-button";
 import { GuildIcon } from "./new-server-form";
 
-export type NavKey = "dashboard" | "staff" | "report" | "logs" | "admin" | "settings";
+export type NavKey = "dashboard" | "live" | "players" | "server" | "staff" | "report" | "logs" | "admin" | "settings";
 
 export type NavItem = { href: string; label: string; icon: LucideIcon; active?: boolean };
 export type NavSection = { label: string; items: NavItem[] };
@@ -19,14 +19,26 @@ type Props = { user: SessionUser; server: Server; active: NavKey; children: Reac
 export default function Shell({ user, server, active, children }: Props) {
   const base = `/s/${server.id}`;
   const item = (key: NavKey, href: string, label: string, icon: LucideIcon): NavItem => ({ href, label, icon, active: key === active });
+  const fivem = [
+    ...(can(user, "view_live")
+      ? [item("live", `${base}/live`, "En direct", Radio), item("players", `${base}/players`, "Joueurs", Contact)]
+      : []),
+    ...(can(user, "resources") || can(user, "console") ? [item("server", `${base}/server`, "Ressources & console", ServerIcon)] : [])
+  ];
   const sections: NavSection[] = [
     {
       label: "Pilotage",
       items: [
         item("dashboard", base, "Accueil", LayoutDashboard),
-        item("staff", `${base}/staff`, "Staff", Users),
-        ...(can(user, "view_report") ? [item("report", `${base}/report`, "Bilan hebdo", TrendingUp)] : []),
         ...(can(user, "view_logs") ? [item("logs", `${base}/logs`, "Logs", ScrollText)] : [])
+      ]
+    },
+    ...(fivem.length ? [{ label: "Serveur FiveM", items: fivem }] : []),
+    {
+      label: "Staff",
+      items: [
+        item("staff", `${base}/staff`, "Équipe", Users),
+        ...(can(user, "view_report") ? [item("report", `${base}/report`, "Bilan hebdo", TrendingUp)] : [])
       ]
     },
     ...(isOwner(user)

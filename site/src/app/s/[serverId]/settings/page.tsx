@@ -1,4 +1,5 @@
 import { requireOwnerPage } from "@/lib/auth";
+import { getLiveState } from "@/lib/agent";
 import { isPlatformOwner } from "@/lib/config";
 import { botInviteUrl } from "@/lib/discord";
 import { LEGACY_SERVER_ID, listManageableGuilds, serverReviewHour, serverTimeZone } from "@/lib/servers";
@@ -17,6 +18,7 @@ export default async function SettingsPage({ params }: { params: Promise<{ serve
   const guildOptions = (await listManageableGuilds(user.discordId))
     .filter((g) => !g.serverId || g.serverId === server.id)
     .map((g) => ({ id: g.guildId, name: g.name }));
+  const live = await getLiveState(server.id);
 
   return (
     <Shell user={user} server={server} active="settings">
@@ -32,7 +34,8 @@ export default async function SettingsPage({ params }: { params: Promise<{ serve
         freeGuildInput={platformOwner}
         guildOptions={guildOptions}
         hasFivemToken={server.hasFivemToken}
-        fivemUrl={`${appUrl}/api/fivem`}
+        appUrl={appUrl}
+        agent={{ linked: live.linked, online: live.online, version: live.agentVersion }}
         inviteUrl={botInviteUrl(server.guildId)}
       />
       {(server.id !== LEGACY_SERVER_ID || platformOwner) && <DeleteServer name={server.name} />}

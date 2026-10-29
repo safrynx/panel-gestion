@@ -9,6 +9,7 @@ export const LOG_GROUPS: Record<string, { label: string; actions: string[] }> = 
   follow: { label: "Commentaires & pastilles", actions: ["note_create", "badge_create", "badge_resolve"] },
   access: { label: "Accès & rôles", actions: ["access_add", "access_remove", "access_permissions", "grade_role_add", "grade_role_remove", "warn_role_set"] },
   sync: { label: "Synchro, IA & reset", actions: ["staff_sync", "review_generate", "counters_reset"] },
+  fivem: { label: "Serveur FiveM", actions: ["player_kick", "player_message", "announce", "resource", "console_command"] },
   server: { label: "Serveur", actions: ["server_create", "server_update", "owner_add", "owner_remove", "fivem_token_rotate"] }
 };
 
@@ -36,8 +37,15 @@ const ACTION_LABELS: Record<string, { label: string; tone: LogTone }> = {
   server_update: { label: "Serveur modifié", tone: "info" },
   owner_add: { label: "Propriétaire +", tone: "info" },
   owner_remove: { label: "Propriétaire −", tone: "danger" },
-  fivem_token_rotate: { label: "Token FiveM", tone: "warn" }
+  fivem_token_rotate: { label: "Token FiveM", tone: "warn" },
+  player_kick: { label: "Kick", tone: "danger" },
+  player_message: { label: "Message joueur", tone: "neutral" },
+  announce: { label: "Annonce", tone: "info" },
+  resource: { label: "Ressource", tone: "warn" },
+  console_command: { label: "Console", tone: "warn" }
 };
+
+const RESOURCE_VERBS: Record<string, string> = { start: "Démarrage", stop: "Arrêt", restart: "Redémarrage", refresh: "Rechargement de la liste des ressources" };
 
 export function actionMeta(action: string): { label: string; tone: LogTone; failed: boolean } {
   const failed = action.endsWith("_failed");
@@ -85,6 +93,16 @@ function describe(action: string, d: Record<string, unknown>): string {
       return String(d.label ?? d.discordId ?? "");
     case "fivem_token_rotate":
       return "Nouveau token de l'agent FiveM (l'ancien ne marche plus)";
+    case "player_kick":
+      return `${d.player ?? `#${d.target}`}${reason}`;
+    case "player_message":
+      return `${d.player ?? `#${d.target}`} : « ${String(d.message ?? "").slice(0, 200)} »`;
+    case "announce":
+      return `« ${String(d.message ?? "").slice(0, 200)} »`;
+    case "resource":
+      return `${RESOURCE_VERBS[String(d.action)] ?? d.action}${d.name ? ` de ${d.name}` : ""}`;
+    case "console_command":
+      return `> ${String(d.command ?? "").slice(0, 200)}`;
     case "staff_sync":
       return `${d.total ?? 0} membres · +${d.inserted ?? 0} / ~${d.updated ?? 0} / −${d.markedLeft ?? 0}`;
     default:

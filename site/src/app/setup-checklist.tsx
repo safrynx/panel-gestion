@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { getLiveState } from "@/lib/agent";
 import { getBotStatus } from "@/lib/bot-status";
 import { ladderIn, loadConfig } from "@/lib/config";
 import { botInviteUrl } from "@/lib/discord";
@@ -9,7 +10,7 @@ type Step = { done: boolean; title: string; hint: string; action?: { label: stri
 /** Steps to get a new server working, computed from its real state. */
 export async function setupSteps(server: Server): Promise<Step[]> {
   const base = `/s/${server.id}`;
-  const [bot, cfg] = await Promise.all([getBotStatus(server.id), loadConfig(server.id)]);
+  const [bot, cfg, live] = await Promise.all([getBotStatus(server.id), loadConfig(server.id), getLiveState(server.id)]);
   const invite = botInviteUrl(server.guildId);
   return [
     { done: Boolean(server.guildId), title: "Relier le serveur Discord", hint: "L'ID du serveur Discord suivi par le bot.", action: { label: "Configuration", href: `${base}/settings` } },
@@ -26,7 +27,12 @@ export async function setupSteps(server: Server): Promise<Step[]> {
       hint: "Des personnes ou des rôles Discord, avec leurs permissions.",
       action: { label: "Accès & rôles", href: `${base}/admin` }
     },
-    { done: server.hasFivemToken, title: "Relier le serveur FiveM", hint: "Génère le token de l'agent et colle-le dans le server.cfg.", action: { label: "Configuration", href: `${base}/settings` } }
+    {
+      done: server.hasFivemToken && live.linked,
+      title: "Relier le serveur FiveM",
+      hint: "Installe la ressource fiverax_agent, génère son token et colle les lignes dans le server.cfg. L'étape se valide au premier contact de l'agent.",
+      action: { label: "Configuration", href: `${base}/settings` }
+    }
   ];
 }
 

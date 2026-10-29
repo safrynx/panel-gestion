@@ -15,7 +15,8 @@ type Props = {
   freeGuildInput: boolean;
   guildOptions: { id: string; name: string }[];
   hasFivemToken: boolean;
-  fivemUrl: string;
+  appUrl: string;
+  agent: { linked: boolean; online: boolean; version: string | null };
   inviteUrl: string | null;
 };
 
@@ -75,7 +76,14 @@ export default function ServerSettings(props: Props) {
     }
   }
 
-  const cfg = token ? `set gtasun_staff_api_url "${props.fivemUrl}"\nset gtasun_staff_api_token "${token}"\nensure gtasun_staff_agent` : "";
+  const cfg = token
+    ? `set fiverax_url "${props.appUrl}"\nset fiverax_token "${token}"\nadd_ace resource.fiverax_agent command allow\nensure fiverax_agent`
+    : "";
+  const agentTag = !props.agent.linked
+    ? { tone: "neutral", label: "Agent jamais connecté" }
+    : props.agent.online
+      ? { tone: "up", label: `Agent en ligne${props.agent.version ? ` · v${props.agent.version}` : ""}` }
+      : { tone: "warn", label: "Agent hors ligne" };
 
   return (
     <div className="cols" style={{ gap: 56, marginBottom: 56 }}>
@@ -121,10 +129,14 @@ export default function ServerSettings(props: Props) {
       <section className="rise rise-2">
         <header style={{ paddingBottom: 12, borderBottom: "1px solid var(--line-2)" }}>
           <h2 className="h2">Agent FiveM</h2>
-          <p className="muted" style={{ margin: "6px 0 0" }}>Chaque serveur a son propre token : la ressource <code>gtasun_staff_agent</code> l&apos;envoie avec chaque session de jeu, et le panel sait ainsi à quel serveur elle appartient.</p>
+          <p className="muted" style={{ margin: "6px 0 0" }}>
+            La ressource <code>fiverax_agent</code> (dossier <code>fivem/</code> du projet) relie le serveur FiveM au panel : joueurs en direct, kick, messages, annonces, ressources et console.
+            Elle appelle le panel toutes les quelques secondes avec le token de ce serveur : aucun port à ouvrir.
+          </p>
         </header>
         <p style={{ marginTop: 18 }}>
-          <span className="tag" data-tone={props.hasFivemToken ? "up" : "warn"}>{props.hasFivemToken ? "Token configuré" : "Aucun token"}</span>
+          <span className="tag" data-tone={props.hasFivemToken ? "up" : "warn"}>{props.hasFivemToken ? "Token configuré" : "Aucun token"}</span>{" "}
+          {props.hasFivemToken && <span className="tag" data-tone={agentTag.tone}>{agentTag.label}</span>}
         </p>
         <button className="btn" disabled={busy} onClick={rotate}>{props.hasFivemToken ? "Générer un nouveau token" : "Générer le token"}</button>
         {token && (
@@ -132,6 +144,7 @@ export default function ServerSettings(props: Props) {
             <b>À copier maintenant : ce token ne sera plus jamais affiché.</b> Ajoute ces lignes au <code>server.cfg</code> du serveur FiveM :
             <pre style={{ whiteSpace: "pre-wrap", wordBreak: "break-all", margin: "10px 0" }}>{cfg}</pre>
             <CopyButton text={cfg} label="Copier" />
+            <p style={{ margin: "10px 0 0" }}>La ligne <code>add_ace</code> autorise l&apos;agent à gérer les ressources et à exécuter les commandes de la console. Pour refuser la console depuis le panel, ajoute <code>set fiverax_console 0</code>.</p>
           </div>
         )}
       </section>

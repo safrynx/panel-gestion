@@ -35,6 +35,8 @@ type Mods = {
   status: typeof import("../src/lib/bot-status");
   playtime: typeof import("../src/lib/playtime");
   servers: typeof import("../src/lib/servers");
+  agent: typeof import("../src/lib/agent");
+  players: typeof import("../src/lib/players");
 };
 let m: Mods;
 let db: Mods["db"]["db"];
@@ -58,7 +60,9 @@ before(async () => {
     week: await import("../src/lib/week"),
     status: await import("../src/lib/bot-status"),
     playtime: await import("../src/lib/playtime"),
-    servers: await import("../src/lib/servers")
+    servers: await import("../src/lib/servers"),
+    agent: await import("../src/lib/agent"),
+    players: await import("../src/lib/players")
   };
   db = m.db.db;
 });
@@ -448,7 +452,7 @@ test("database: batches are atomic, migrations are idempotent and safe to run co
   const before = (await client.execute("SELECT COUNT(*) AS n FROM schema_migrations")).rows[0].n;
   await Promise.all([runMigrations(client), runMigrations(client)]);
   assert.equal((await client.execute("SELECT COUNT(*) AS n FROM schema_migrations")).rows[0].n, before);
-  assert.equal(Number(before), 14);
+  assert.equal(Number(before), 15);
 });
 
 test("bot API: sync snapshot, member event, voice events, heartbeat, playtime, shutdown", async () => {
@@ -762,15 +766,125 @@ test("deleting a server removes all its data and nothing of the other servers", 
   await db.run("INSERT INTO staff_notes (server_id, discord_id, body, author_discord_id) VALUES (?, ?, 'x', ?)", [id, A, B]);
   await m.status.setServerStatus(id, "heartbeat", new Date().toISOString());
   await m.servers.rotateFivemToken(id);
+  await m.agent.handleAgentCall(id, m.agent.agentRequestSchema.parse({
+    events: [{ type: "join", session: "d1", name: "Doomed", identifiers: ["license:dead"], timestamp: Math.floor(Date.now() / 1000) }],
+    console: [{ message: "hello" }]
+  }));
   const legacyBefore = (await m.sync.listStaffWithStats(S)).length;
 
   assert.equal(await m.servers.deleteServer(id), true);
   assert.equal(await m.servers.getServer(id), null);
-  for (const table of ["staff_members", "voice_sessions", "staff_notes", "discord_roles", "grade_roles", "server_owners", "audit_log"]) {
+  for (const table of ["staff_members", "voice_sessions", "staff_notes", "discord_roles", "grade_roles", "server_owners", "audit_log", "players", "player_sessions", "fivem_state", "fivem_console"]) {
     assert.equal((await db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM ${table} WHERE server_id = ?`, [id]))!.n, 0, table);
   }
   assert.equal((await db.get<{ n: number }>("SELECT COUNT(*) AS n FROM bot_status WHERE key LIKE ?", [`${id}:%`]))!.n, 0);
   assert.equal((await m.sync.listStaffWithStats(S)).length, legacyBefore); // other servers untouched
   assert.equal(await m.servers.getServerByGuild("540000000000000009"), null); // the guild can be registered again
   assert.equal(await m.servers.deleteServer(id), false);
+});
+
+// ---- two-way FiveM agent ----
+
+const agentCall = (serverId: string, body: unknown, now?: Date) => m.agent.handleAgentCall(serverId, m.agent.agentRequestSchema.parse(body), now);
+const AG = "agent-srv";
+
+test("agent request: Lua empty tables ({}) are empty lists, IP identifiers are dropped", () => {
+  const parsed = m.agent.agentRequestSchema.parse({ events: {}, console: {}, results: {}, state: { hostname: "h", maxClients: 64, uptime: 12.7, players: {}, resources: {} } });
+  assert.deepEqual([parsed.events, parsed.console, parsed.results, parsed.state?.players], [[], [], [], []]);
+  assert.equal(parsed.state?.uptime, 12);
+  const ids = m.agent.parseIdentifiers(["ip:1.2.3.4", "steam:11", "license:abc", `discord:${A}`]);
+  assert.deepEqual(ids, { license: "license:abc", discordId: A, kept: ["steam:11", "license:abc", `discord:${A}`] });
+  assert.equal(m.agent.parseIdentifiers(["ip:1.2.3.4"]).license, null);
+});
+
+test("agent: joins and leaves build the player list, staff playtime is counted, boot closes old sessions", async () => {
+  const t = Math.floor(Date.now() / 1000) - 3600;
+  await agentCall(S, {
+    boot: true,
+    version: "2.0.0",
+    events: [
+      { type: "join", session: "p1", name: "Alice", identifiers: ["license:alice", `discord:${A}`, "ip:9.9.9.9"], timestamp: t },
+      { type: "join", session: "p2", name: "Bob", identifiers: ["license:bob"], timestamp: t + 60 }
+    ],
+    state: { hostname: "Mon serveur", maxClients: 64, uptime: 100, players: [{ id: 1, name: "Alice", session: "p1", ping: 30 }, { id: 2, name: "Bob", session: "p2", ping: 80 }], resources: [{ name: "chat", state: "started" }] }
+  });
+  const live = await m.agent.getLiveState(S);
+  assert.equal(live.online, true);
+  assert.equal(live.agentVersion, "2.0.0");
+  assert.deepEqual(live.players.map((p) => [p.id, p.name, Boolean(p.staff), p.discordId]), [[1, "Alice", true, A], [2, "Bob", false, null]]);
+  assert.equal(await m.fivem.isInFivemNow(S, A), true); // staff member: also tracked on the staff pages
+
+  await agentCall(S, { events: [{ type: "leave", session: "p1", reason: "Exiting", timestamp: t + 600 }] });
+  await agentCall(S, { events: [{ type: "leave", session: "p1", reason: "replay", timestamp: t + 900 }] }); // replay ignored
+  assert.equal(await m.fivem.isInFivemNow(S, A), false);
+  const { rows } = await m.players.listPlayers(S, { q: "alice" });
+  assert.equal(rows.length, 1);
+  assert.deepEqual([rows[0].connections, rows[0].playSeconds, rows[0].online, rows[0].staff?.grade], [1, 600, false, "Admin"]);
+  const detail = (await m.players.getPlayer(S, rows[0].id))!;
+  assert.deepEqual(detail.identifiers, ["license:alice", `discord:${A}`]); // no IP stored
+  assert.equal(detail.sessions[0].leaveReason, "Exiting");
+
+  // Alice comes back under another name: same player (license), name updated, Discord link kept.
+  await agentCall(S, { events: [{ type: "join", session: "p3", name: "Alice2", identifiers: ["license:alice"], timestamp: t + 1200 }] });
+  const again = (await m.players.listPlayers(S, { q: "license:alice" })).rows[0];
+  assert.deepEqual([again.id, again.name, again.connections, again.online, again.discordId], [rows[0].id, "Alice2", 2, true, A]);
+
+  // Server restarted: the agent boots again and every open session is closed.
+  await agentCall(S, { boot: true });
+  assert.equal((await m.players.listPlayers(S)).rows.filter((p) => p.online).length, 0);
+});
+
+test("agent: actions are queued, handed over once, and their result reported back", async () => {
+  await agentCall(AG, { state: { hostname: "x", maxClients: 8, uptime: 1, players: [], resources: [] } });
+  const id = await m.agent.enqueueCommand(AG, { discordId: A, username: "a" }, "announce", { message: "Reboot dans 5 min" });
+  assert.equal((await m.agent.getCommandStatus(AG, id))?.status, "pending");
+  assert.equal(await m.agent.getCommandStatus("other", id), null); // another server cannot read it
+
+  const first = await agentCall(AG, {});
+  assert.deepEqual(first.commands, [{ id, kind: "announce", payload: { message: "Reboot dans 5 min" } }]);
+  assert.equal(first.interval, 2); // actions in flight: fast pace
+  assert.deepEqual((await agentCall(AG, {})).commands, []); // never handed twice
+  await agentCall("other", { results: [{ id, ok: true }] }); // another server cannot answer for it
+  assert.equal((await m.agent.getCommandStatus(AG, id))?.status, "sent");
+  await agentCall(AG, { results: [{ id, ok: false, message: "Ressource introuvable" }] });
+  assert.deepEqual(await m.agent.getCommandStatus(AG, id), { id, status: "failed", result: "Ressource introuvable" });
+
+  // Not picked up in time (server off): expired, never run later.
+  const late = await m.agent.enqueueCommand(AG, { discordId: A }, "refresh", {});
+  assert.deepEqual((await agentCall(AG, {}, new Date(Date.now() + 3 * 60_000))).commands, []);
+  assert.equal((await m.agent.getCommandStatus(AG, late))?.status, "expired");
+  // Picked up but never answered: shown as lost after a minute.
+  const lost = await m.agent.enqueueCommand(AG, { discordId: A }, "refresh", {});
+  await agentCall(AG, {});
+  assert.equal((await m.agent.getCommandStatus(AG, lost, new Date(Date.now() + 2 * 60_000)))?.status, "lost");
+
+  const logs = await db.all<{ action: string }>("SELECT action FROM audit_log WHERE server_id = ? ORDER BY id", [AG]);
+  assert.deepEqual(logs.map((l) => l.action), ["announce", "resource", "resource"]);
+});
+
+test("agent: pace follows the live pages, offline after silence, console keeps its tail", async () => {
+  const t0 = new Date();
+  await db.run("UPDATE fivem_state SET watched_at = NULL WHERE server_id = ?", [AG]);
+  assert.equal((await agentCall(AG, {}, t0)).interval, 8);
+  await m.agent.getLiveState(AG, { watch: true }, t0);
+  assert.equal((await agentCall(AG, {}, t0)).interval, 2);
+  const later = await m.agent.getLiveState(AG, {}, new Date(t0.getTime() + 60_000));
+  assert.deepEqual([later.online, later.players.length], [false, 0]);
+
+  await agentCall(AG, { console: Array.from({ length: 500 }, (_, i) => ({ channel: "c", message: `a${i}` })) });
+  await agentCall(AG, { console: Array.from({ length: 500 }, (_, i) => ({ message: `b${i}` })) });
+  await agentCall(AG, { console: [{ message: "last" }] });
+  const lines = await m.agent.getConsole(AG, 0, 5000);
+  assert.equal(lines.length, 1000);
+  assert.equal(lines.at(-1)?.message, "last");
+  assert.deepEqual((await m.agent.getConsole(AG, lines.at(-2)!.id)).map((l) => l.message), ["last"]);
+});
+
+test("stale player sessions are closed at the agent's last sign of life", async () => {
+  const start = new Date(Date.now() - 3 * 3600_000);
+  const lastSeen = new Date(start.getTime() + 1800_000);
+  await agentCall("stale-srv", { events: [{ type: "join", session: "s", name: "Zed", identifiers: ["license:zed"], timestamp: Math.floor(start.getTime() / 1000) }] }, lastSeen);
+  assert.equal(await m.agent.closeStalePlayerSessions(12 * 3600), 1);
+  const zed = (await m.players.listPlayers("stale-srv")).rows[0];
+  assert.deepEqual([zed.online, zed.playSeconds], [false, 1800]);
 });

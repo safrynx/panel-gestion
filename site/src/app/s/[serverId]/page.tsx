@@ -3,6 +3,7 @@ import { can, requireStaffPage } from "@/lib/auth";
 import { getStaffOverview } from "@/lib/stats";
 import { listLogs } from "@/lib/logs";
 import { getCountersResetAt } from "@/lib/counters";
+import { getLiveState } from "@/lib/agent";
 import { formatDateTime } from "@/lib/format";
 import Shell, { PageHead } from "@/app/shell";
 import Avatar from "@/app/avatar";
@@ -23,6 +24,7 @@ export default async function DashboardPage({ params }: { params: Promise<{ serv
   const warned = staff.filter((m) => m.warnLevel > 0).length;
   const resetAt = await getCountersResetAt(server.id);
   const logs = can(user, "view_logs") ? (await listLogs(server.id, { limit: 7 })).rows : null;
+  const live = can(user, "view_live") ? await getLiveState(server.id) : null;
 
   const stats = [
     { label: "Staff actif", value: staff.length, kind: "int" as const, hint: `${inVoice} en vocal maintenant` },
@@ -38,6 +40,22 @@ export default async function DashboardPage({ params }: { params: Promise<{ serv
       <PageHead kicker={server.name} title={`Salut ${user.username}`} actions={<>{can(user, "sync") && <SyncButton />}<Link href={`${base}/staff`} className="btn primary">Ouvrir le staff</Link></>}>
         L&apos;état de l&apos;équipe sur les 7 derniers jours.{resetAt && resetAt.getTime() > Date.now() - 7 * 86400_000 && <> Compteurs remis à zéro le {formatDateTime(resetAt.toISOString())}.</>}
       </PageHead>
+
+      {live?.linked && (
+        <Link href={`${base}/live`} className="guild-row rise" style={{ marginBottom: 18, flexWrap: "wrap" }}>
+          <span className={`dot ${live.online ? "on" : ""}`} />
+          <div style={{ flex: 1, minWidth: 200 }}>
+            <div style={{ fontWeight: 600 }}>{live.online ? "Serveur FiveM en ligne" : "Serveur FiveM hors ligne"}</div>
+            <div className="muted" style={{ fontSize: 12 }}>{live.hostname ?? server.name}</div>
+          </div>
+          {live.online && (
+            <span className="muted" style={{ fontSize: 13 }}>
+              <b style={{ color: "var(--text)" }}>{live.players.length}</b> / {live.maxClients} joueurs · <b style={{ color: "var(--text)" }}>{live.players.filter((p) => p.staff).length}</b> staff en jeu
+            </span>
+          )}
+          <span className="linkish">Ouvrir le direct</span>
+        </Link>
+      )}
 
       <div className="strip">
         {stats.map((s, i) => (

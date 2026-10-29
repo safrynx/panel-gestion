@@ -140,6 +140,8 @@ export function describeApiError(data: { error?: string; discordStatus?: number;
     case "guild_not_managed": return "Il te faut la permission « Gérer le serveur » sur ce serveur Discord (reconnecte-toi si tu viens de l'obtenir).";
     case "too_many_servers": return "Tu as atteint le nombre maximum de serveurs.";
     case "confirm_mismatch": return "Le nom tapé ne correspond pas : rien n'a été supprimé.";
+    case "agent_offline": return "Le serveur FiveM ne répond pas (agent arrêté ou serveur éteint).";
+    case "player_offline": return "Ce joueur n'est plus connecté.";
     default: return `Erreur : ${data.error ?? status}`;
   }
 }

@@ -13,7 +13,13 @@ export const PERMISSIONS = [
   { key: "badges", label: "Gérer les pastilles", group: "Suivi" },
   { key: "sync", label: "Synchroniser Discord", group: "Suivi" },
   { key: "run_review", label: "Lancer le bilan IA", group: "Suivi" },
-  { key: "reset_counters", label: "Reset des compteurs", group: "Suivi" }
+  { key: "reset_counters", label: "Reset des compteurs", group: "Suivi" },
+  { key: "view_live", label: "Voir le serveur en direct et les joueurs", group: "Serveur FiveM" },
+  { key: "player_message", label: "Message privé à un joueur", group: "Serveur FiveM" },
+  { key: "player_kick", label: "Kick un joueur", group: "Serveur FiveM" },
+  { key: "announce", label: "Annonce à tout le serveur", group: "Serveur FiveM" },
+  { key: "resources", label: "Démarrer / arrêter les ressources", group: "Serveur FiveM" },
+  { key: "console", label: "Console du serveur (commandes)", group: "Serveur FiveM" }
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number]["key"];

@@ -363,6 +363,67 @@ const migrations: { name: string; sql: string }[] = [
       CREATE INDEX IF NOT EXISTS idx_user_guilds_guild ON user_guilds(guild_id);
       ALTER TABLE servers ADD COLUMN icon_url TEXT;
     `
+  },
+  {
+    // Two-way FiveM agent: live state (one row per server), queue of actions sent from the panel, every player
+    // ever seen (not only staff) with their sessions, and the tail of the server console.
+    name: "015_fivem_live",
+    sql: `
+      CREATE TABLE IF NOT EXISTS fivem_state (
+        server_id TEXT PRIMARY KEY,
+        seen_at TEXT NOT NULL,
+        state_json TEXT,
+        state_at TEXT,
+        agent_version TEXT,
+        watched_at TEXT
+      );
+      CREATE TABLE IF NOT EXISTS fivem_commands (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        server_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        payload TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL DEFAULT 'pending',
+        result TEXT,
+        actor_discord_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        sent_at TEXT,
+        done_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_fivem_commands_queue ON fivem_commands(server_id, status, id);
+      CREATE TABLE IF NOT EXISTS players (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        server_id TEXT NOT NULL,
+        license TEXT NOT NULL,
+        name TEXT NOT NULL,
+        discord_id TEXT,
+        identifiers_json TEXT NOT NULL DEFAULT '[]',
+        first_seen_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL,
+        UNIQUE (server_id, license)
+      );
+      CREATE INDEX IF NOT EXISTS idx_players_seen ON players(server_id, last_seen_at);
+      CREATE INDEX IF NOT EXISTS idx_players_discord ON players(server_id, discord_id);
+      CREATE TABLE IF NOT EXISTS player_sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        server_id TEXT NOT NULL,
+        player_id INTEGER NOT NULL,
+        external_id TEXT NOT NULL UNIQUE,
+        started_at TEXT NOT NULL,
+        ended_at TEXT,
+        seconds INTEGER NOT NULL DEFAULT 0,
+        leave_reason TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_player_sessions_player ON player_sessions(player_id, id);
+      CREATE INDEX IF NOT EXISTS idx_player_sessions_open ON player_sessions(server_id, ended_at);
+      CREATE TABLE IF NOT EXISTS fivem_console (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        server_id TEXT NOT NULL,
+        at TEXT NOT NULL,
+        channel TEXT,
+        message TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_fivem_console ON fivem_console(server_id, id)
+    `
   }
 ];
 

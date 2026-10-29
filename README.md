@@ -9,7 +9,7 @@ Trois dossiers indépendants :
 |---|---|---|
 | [`site/`](site) | Panel web (Next.js) + base libSQL (Turso en prod). Il possède **toutes les données**, rangées par serveur. | Vercel / un serveur Node |
 | [`bot/`](bot) | **Un seul** bot Discord pour tous les serveurs. Il surveille les serveurs Discord enregistrés sur le site et **envoie tout au site par API**. Aucune base de données. | N'importe où (VPS, conteneur…), il suffit qu'il joigne le site |
-| [`fivem/`](fivem) | Ressource FiveM qui envoie les sessions de jeu au site (`/api/fivem`), avec le **token propre à son serveur**. | Chaque serveur FiveM |
+| [`fivem/`](fivem) | Ressource `fiverax_agent` : relie chaque serveur FiveM au site (`/api/fivem/agent`) avec le **token propre à son serveur**. Joueurs en direct, kick, messages, annonces, ressources, console. | Chaque serveur FiveM |
 
 ## Comment ils se parlent
 ```
@@ -20,6 +20,8 @@ FiveM (1 par serveur) ──(HTTPS, Bearer <token du serveur>)──────
 - Chaque message du bot (`sync`, `member`, `voice`, `playtime`) indique son `guildId` ; le site le range dans le bon serveur. `heartbeat` liste les serveurs où le bot est présent, ce qui permet au panel d'afficher « bot absent » serveur par serveur.
 - `tick` (10 min) : nettoyage des sessions FiveM, puis bilan IA du dimanche **de chaque serveur, dans son propre fuseau horaire**.
 - Le token d'un agent FiveM désigne son serveur : un agent ne peut jamais écrire dans un autre serveur.
+- L'agent FiveM **interroge** le site (toutes les 2 s quand quelqu'un regarde les pages « En direct », 8 s sinon) : il envoie connexions, déconnexions, console et résultats, et reçoit les actions en attente. Aucun port à ouvrir, compatible Vercel. Une action non récupérée en 2 min est abandonnée (jamais exécutée en retard). L'ancien endpoint `/api/fivem` (agent 1.x) marche toujours.
+- `server.cfg` : `set fiverax_url "https://…"`, `set fiverax_token "fvm_…"`, `add_ace resource.fiverax_agent command allow`, `ensure fiverax_agent` (les lignes exactes sont données dans Configuration). `set fiverax_console 0` refuse la console depuis le panel.
 
 ## Qui voit quoi
 - **N'importe qui** se connecte avec Discord et **ajoute son serveur** : seulement un serveur Discord où il est propriétaire, administrateur ou a « Gérer le serveur » (limite `MAX_SERVERS_PER_USER`, 5 par défaut). Il en devient propriétaire et la page Configuration le guide (bot, rôles, équipe, FiveM).

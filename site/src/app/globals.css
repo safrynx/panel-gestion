@@ -255,3 +255,13 @@ textarea.field { resize: vertical; min-height: 64px; }
 @media (min-width: 900px) { .log.wide { grid-template-columns: 124px 190px 1fr; } }
 
 .pick:hover:not(:disabled) { background: rgba(var(--accent-rgb), 0.14) !important; }
+
+/* ---------- server console ---------- */
+.console {
+  height: 460px; overflow-y: auto; margin-top: 14px; padding: 14px 16px; border-radius: 12px;
+  border: 1px solid var(--line-2); background: #070604;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; line-height: 1.6;
+  white-space: pre-wrap; word-break: break-word; color: #d9d2c1;
+}
+.console-ch { color: var(--accent); opacity: 0.8; }
+.console-prompt { display: grid; place-items: center; width: 34px; flex: none; color: var(--accent); font-family: ui-monospace, monospace; font-weight: 700; }

@@ -1,3 +1,4 @@
+import { closeStalePlayerSessions } from "./agent";
 import { closeStaleFivemSessions } from "./fivem";
 import { getServerStatus, setServerStatus } from "./bot-status";
 import { aiConfigured, generateWeeklyReviews } from "./review";
@@ -31,7 +32,8 @@ export async function runReviewBatch(server: Server): Promise<void> {
 /** Periodic housekeeping, triggered by the bot's tick (or any cron hitting POST /api/bot/tick). */
 export async function runMaintenance() {
   const staleFivemClosed = await closeStaleFivemSessions(FIVEM_STALE_SECONDS);
+  const stalePlayersClosed = await closeStalePlayerSessions(FIVEM_STALE_SECONDS);
   const due: Server[] = [];
   for (const server of await listServers()) if (await reviewDue(server)) due.push(server);
-  return { staleFivemClosed, reviewDue: due };
+  return { staleFivemClosed, stalePlayersClosed, reviewDue: due };
 }
