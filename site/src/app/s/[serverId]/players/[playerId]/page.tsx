@@ -3,6 +3,8 @@ import { notFound } from "next/navigation";
 import { can, requirePermissionPage } from "@/lib/auth";
 import { getLiveState } from "@/lib/agent";
 import { getPlayer } from "@/lib/players";
+import { isBanActive, listBans, listDetections, listScreenshots } from "@/lib/security";
+import { detectionLabel } from "@/lib/security-config";
 import { formatDateTime, formatDuration } from "@/lib/format";
 import Shell from "@/app/shell";
 import CopyButton from "@/app/copy-button";
@@ -20,8 +22,16 @@ export default async function PlayerPage({ params }: { params: Promise<{ serverI
   const { user, server } = await requirePermissionPage(serverId, "view_live");
   const id = Number(playerId);
   if (!Number.isInteger(id) || id <= 0) notFound();
-  const [player, live] = await Promise.all([getPlayer(server.id, id), getLiveState(server.id)]);
+  const security = can(user, "view_security");
+  const [player, live, bans, detections, shots] = await Promise.all([
+    getPlayer(server.id, id),
+    getLiveState(server.id),
+    security ? listBans(server.id, { playerId: id, limit: 20 }) : Promise.resolve([]),
+    security ? listDetections(server.id, { playerId: id, limit: 30 }) : Promise.resolve([]),
+    security ? listScreenshots(server.id, { playerId: id, limit: 12 }) : Promise.resolve([])
+  ]);
   if (!player) notFound();
+  const activeBan = bans.find((b) => isBanActive(b)) ?? null;
   const inGame = live.players.find((p) => p.playerId === player.id) ?? null;
 
   const summary: [string, string][] = [
@@ -43,12 +53,17 @@ export default async function PlayerPage({ params }: { params: Promise<{ serverI
           <h1 className="h1" style={{ fontSize: "clamp(22px,3vw,34px)" }}>{player.name}</h1>
           <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: 12, flexWrap: "wrap" }}>
             {player.staff && <Link href={`/s/${server.id}/staff/${player.discordId}`} className="plate"><span>Staff · {player.staff.grade || player.staff.username}</span></Link>}
+            {activeBan && <span className="tag" data-tone="danger">Banni{activeBan.expiresAt ? ` jusqu'au ${formatDateTime(activeBan.expiresAt)}` : " définitivement"}</span>}
             <span className="muted" style={{ fontSize: 12 }}>{player.license}</span>
           </div>
         </div>
-        {inGame && (
-          <PlayerActions target={inGame.id} name={player.name} canMessage={can(user, "player_message")} canKick={can(user, "player_kick")} />
-        )}
+        <PlayerActions
+          playerId={player.id}
+          target={inGame?.id ?? null}
+          name={player.name}
+          banned={Boolean(activeBan)}
+          can={{ message: can(user, "player_message"), kick: can(user, "player_kick"), screenshot: can(user, "screenshot"), ban: can(user, "ban") }}
+        />
       </div>
 
       <div className="strip">
@@ -72,6 +87,38 @@ export default async function PlayerPage({ params }: { params: Promise<{ serverI
           </ul>
           <p className="muted" style={{ fontSize: 12 }}>Les adresses IP ne sont jamais enregistrées.</p>
         </section>
+
+        {security && (
+          <section className="rise rise-2">
+            <header style={{ paddingBottom: 12, borderBottom: "1px solid var(--line-2)" }}><h2 className="h2">Sécurité</h2></header>
+            <ul style={{ listStyle: "none", margin: "6px 0 0", padding: 0 }}>
+              {bans.length === 0 && detections.length === 0 && <li className="muted" style={{ padding: "16px 0" }}>Aucun ban ni détection.</li>}
+              {bans.map((b) => (
+                <li key={`b${b.id}`} style={{ display: "flex", justifyContent: "space-between", gap: 14, padding: "11px 0", borderBottom: "1px solid var(--line)" }}>
+                  <div><b>Ban</b> — {b.reason}<div className="muted" style={{ fontSize: 12 }}>{formatDateTime(b.createdAt)} · {b.expiresAt ? `jusqu'au ${formatDateTime(b.expiresAt)}` : "définitif"}</div></div>
+                  <span className="tag" data-tone={isBanActive(b) ? "danger" : "neutral"}>{isBanActive(b) ? "Actif" : b.revokedAt ? "Levé" : "Expiré"}</span>
+                </li>
+              ))}
+              {detections.map((d) => (
+                <li key={`d${d.id}`} style={{ display: "flex", justifyContent: "space-between", gap: 14, padding: "11px 0", borderBottom: "1px solid var(--line)" }}>
+                  <div>{detectionLabel(d.kind)}<div className="muted" style={{ fontSize: 12 }}>{formatDateTime(d.at)}</div></div>
+                  <span className="tag" data-tone={d.action === "ban" ? "danger" : d.action === "kick" ? "warn" : "info"}>{d.action === "log" ? "Signalé" : d.action}</span>
+                </li>
+              ))}
+            </ul>
+            {shots.length > 0 && (
+              <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))", marginTop: 14 }}>
+                {shots.map((s) => (
+                  <a key={s.id} href={`/api/s/${server.id}/screenshots/${s.id}`} target="_blank" rel="noreferrer" title={s.summary ?? ""} style={{ position: "relative" }}>
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={`/api/s/${server.id}/screenshots/${s.id}`} alt="" loading="lazy" style={{ width: "100%", aspectRatio: "16 / 9", objectFit: "cover", borderRadius: 8, display: "block" }} />
+                    <span className="tag" data-tone={s.verdict === "cheat" ? "danger" : s.verdict === "suspicious" ? "warn" : s.verdict === "clean" ? "up" : "neutral"} style={{ position: "absolute", left: 6, bottom: 6, background: "rgba(0,0,0,0.7)" }}>{s.verdict}</span>
+                  </a>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
 
         <section className="rise rise-2">
           <header style={{ paddingBottom: 12, borderBottom: "1px solid var(--line-2)" }}><h2 className="h2">Dernières sessions</h2></header>

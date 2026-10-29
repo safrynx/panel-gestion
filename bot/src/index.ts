@@ -1,4 +1,5 @@
 import { Client, Events, GatewayIntentBits, type Guild, type GuildMember, type PartialGuildMember } from "discord.js";
+import { indexGuildMembers, memberChanged, setAntiraidConfig, setupAntiraid } from "./antiraid";
 import { siteConfig, sitePost } from "./api";
 import { playtimeSources, readPlaytimeTotals, type PlaytimeSource } from "./playtime";
 
@@ -28,7 +29,8 @@ const FULL_SYNC_MS = 30 * 60_000;
 const SERVERS_MS = 5 * 60_000;
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildVoiceStates]
+  // GuildModeration: audit log entries and bans, read by the anti-raid.
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildVoiceStates, GatewayIntentBits.GuildModeration]
 });
 
 /** Guild ids of the servers registered on the site. */
@@ -54,8 +56,9 @@ const activeGuilds = (): Guild[] => [...client.guilds.cache.values()].filter((g)
 
 /** Ask the site which guilds to watch. Keeps the previous list when the site is unreachable. */
 async function refreshServers(): Promise<boolean> {
-  const result = await sitePost<{ guilds: { guildId: string; serverId: string; name: string }[] }>("servers", {}, 1);
+  const result = await sitePost<{ guilds: { guildId: string; serverId: string; name: string; antiraid?: unknown }[] }>("servers", {}, 1);
   if (!result) return false;
+  for (const g of result.guilds) setAntiraidConfig(g.guildId, g.antiraid);
   const next = new Set(result.guilds.map((g) => g.guildId));
   for (const id of synced) if (!next.has(id)) synced.delete(id);
   const added = [...next].filter((id) => !watched.has(id));
@@ -70,6 +73,7 @@ async function refreshServers(): Promise<boolean> {
 /** Send the whole picture of one guild (roles, members, who is in voice) so the site can reconcile its database. */
 async function fullSync(guild: Guild): Promise<boolean> {
   const [roles, members] = await Promise.all([guild.roles.fetch(), guild.members.fetch()]);
+  indexGuildMembers(guild, members.values());
   const payload = {
     guildId: guild.id,
     roles: [...roles.values()].filter((r) => r.id !== guild.id).map((r) => ({ id: r.id, name: r.name, position: r.position, color: r.color })),
@@ -113,6 +117,7 @@ function scheduleSync(delay: number) {
 client.once(Events.ClientReady, async (readyClient) => {
   console.log(`Staff bot connected as ${readyClient.user.tag} (${readyClient.guilds.cache.size} guild(s)) -> site ${siteConfig().url}`);
   scheduleSync(0);
+  setupAntiraid(readyClient, (guildId) => watched.has(guildId));
 
   // A server registered on the site is picked up within a few minutes, without restarting the bot.
   setInterval(async () => {
@@ -121,7 +126,9 @@ client.once(Events.ClientReady, async (readyClient) => {
 
   const heartbeat = async () => {
     const guilds = activeGuilds().map((g) => ({ guildId: g.id, topRolePosition: g.members.me?.roles.highest.position ?? null }));
-    await sitePost("heartbeat", { guilds }, 1);
+    // The answer carries the anti-raid settings: a change made on the panel applies within a minute.
+    const result = await sitePost<{ antiraid?: Record<string, unknown> }>("heartbeat", { guilds }, 1);
+    for (const [guildId, config] of Object.entries(result?.antiraid ?? {})) setAntiraidConfig(guildId, config);
   };
   void heartbeat();
   setInterval(() => void heartbeat(), HEARTBEAT_MS);
@@ -163,12 +170,15 @@ client.on(Events.GuildCreate, (guild) => {
 });
 
 client.on(Events.GuildMemberAdd, (m) => {
+  if (watched.has(m.guild.id)) memberChanged(m);
   if (watched.has(m.guild.id) && !m.user.bot) void sitePost("member", { guildId: m.guild.id, ...memberPayload(m) });
 });
 client.on(Events.GuildMemberUpdate, (_old, m) => {
+  if (watched.has(m.guild.id)) memberChanged(m);
   if (watched.has(m.guild.id) && !m.user.bot) void sitePost("member", { guildId: m.guild.id, ...memberPayload(m) });
 });
 client.on(Events.GuildMemberRemove, (m) => {
+  if (watched.has(m.guild.id) && !m.partial) memberChanged(m, false);
   if (!watched.has(m.guild.id) || m.user.bot) return;
   void sitePost("member", { guildId: m.guild.id, ...memberPayload(m, false) });
   void sitePost("voice", { guildId: m.guild.id, action: "leave", discordId: m.id, roleIds: [], at: new Date().toISOString() });

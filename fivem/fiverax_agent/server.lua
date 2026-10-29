@@ -1,18 +1,21 @@
 -- Fiverax agent: links this FiveM server to its panel.
 --
 -- Every few seconds the agent calls the panel (POST <fiverax_url>/api/fivem/agent) with what happened since the
--- previous call (players joining / leaving, console lines, results of actions) and, now and then, a snapshot of the
--- server (players, resources). The answer holds the actions queued from the panel (kick, message, announce,
--- resources, console) and the delay before the next call. The agent always opens the connection: no port to open.
+-- previous call (players joining / leaving, anticheat detections, console lines, results of actions) and, now and
+-- then, a snapshot of the server (players with their position and voice, resources). The answer holds the actions
+-- queued from the panel, the delay before the next call and, when they changed, the anticheat settings and the bans.
+-- The agent always opens the connection: no port to open.
 --
 -- server.cfg:
 --   set fiverax_url "https://ton-panel.example"
 --   set fiverax_token "fvm_..."                       # token of this server (panel > Configuration)
 --   add_ace resource.fiverax_agent command allow      # needed for console commands and resources
+--   add_ace group.admin fiverax.bypass allow          # staff never flagged by the anticheat
 --   set fiverax_console 0                             # optional: refuse console commands from the panel
+--   ensure screenshot-basic                           # optional: screenshots analysed by the AI
 --   ensure fiverax_agent
 
-local VERSION = '2.0.0'
+local VERSION = '3.0.0'
 local RESOURCE = GetCurrentResourceName()
 
 -- The 1.x convars (gtasun_staff_api_url pointed at /api/fivem) still work.
@@ -26,26 +29,45 @@ local URL = baseUrl()
 local TOKEN = GetConvar('fiverax_token', '')
 if TOKEN == '' then TOKEN = GetConvar('gtasun_staff_api_token', '') end
 local ALLOW_CONSOLE = GetConvarInt('fiverax_console', 1) == 1
+local HEADERS = { ['Content-Type'] = 'application/json', ['Authorization'] = 'Bearer ' .. TOKEN }
 
-local STATE_EVERY = 15   -- seconds between two snapshots when nothing changed
+local STATE_EVERY = 15   -- seconds between two snapshots when nothing changed (and nobody watches)
 local MAX_EVENTS = 300
 local MAX_CONSOLE = 500
+local BANS_FILE = 'bans_cache.json'
 
-local sessions = {}      -- [server id] = session id
+-- Shared with anticheat.lua (same Lua state).
+FVX = {
+    sessions = {},       -- [server id] = session id
+    joinedAt = {},       -- [server id] = os.time() of the join
+    client = {},         -- [server id] = { zone, vehicle } reported by the client module
+    settings = nil,      -- anticheat settings from the panel (nil until loaded)
+    secRev = 0,
+    url = URL,
+    headers = HEADERS
+}
+
 local events = {}
 local consoleLines = {}
 local results = {}
 local dirty = true
 local lastState = 0
 local interval = 8
+local watched = false
 local booted = false
 local warnedAuth = false
+local bansByIdentifier, bansByToken = {}, {}
 
 local function stripColors(text)
     return (text:gsub('%^%d', ''))
 end
 
-local function identifiersOf(src)
+function FVX.pushEvent(event)
+    if #events >= MAX_EVENTS then table.remove(events, 1) end
+    events[#events + 1] = event
+end
+
+function FVX.identifiers(src)
     local out = {}
     for _, id in ipairs(GetPlayerIdentifiers(src)) do
         if id:sub(1, 3) ~= 'ip:' then out[#out + 1] = id end
@@ -53,19 +75,30 @@ local function identifiersOf(src)
     return out
 end
 
+function FVX.tokens(src)
+    local out = {}
+    for i = 0, (GetNumPlayerTokens(src) or 0) - 1 do
+        local token = GetPlayerToken(src, i)
+        if token then out[#out + 1] = token end
+    end
+    return out
+end
+
 local function playerJoined(src)
-    if sessions[src] then return end
+    if FVX.sessions[src] then return end
     local session = ('%d-%d-%d'):format(src, os.time(), math.random(100000, 999999))
-    sessions[src] = session
-    events[#events + 1] = { type = 'join', session = session, name = GetPlayerName(src) or '?', identifiers = identifiersOf(src), timestamp = os.time() }
+    FVX.sessions[src] = session
+    FVX.joinedAt[src] = os.time()
+    FVX.pushEvent({ type = 'join', session = session, name = GetPlayerName(src) or '?', identifiers = FVX.identifiers(src), tokens = FVX.tokens(src), timestamp = os.time() })
     dirty = true
 end
 
 local function playerLeft(src, reason)
-    local session = sessions[src]
+    local session = FVX.sessions[src]
+    FVX.client[src] = nil
     if not session then return end
-    sessions[src] = nil
-    events[#events + 1] = { type = 'leave', session = session, reason = reason and tostring(reason):sub(1, 200) or nil, timestamp = os.time() }
+    FVX.sessions[src], FVX.joinedAt[src] = nil, nil
+    FVX.pushEvent({ type = 'leave', session = session, reason = reason and tostring(reason):sub(1, 200) or nil, timestamp = os.time() })
     dirty = true
 end
 
@@ -81,12 +114,99 @@ RegisterConsoleListener(function(channel, message)
     consoleLines[#consoleLines + 1] = { channel = channel and channel:sub(1, 60) or nil, message = message:sub(1, 4000) }
 end)
 
+-- ---- bans: refused at connection, from the list the panel sends (cached on disk if the panel is unreachable) ----
+
+local function indexBans(list)
+    bansByIdentifier, bansByToken = {}, {}
+    for _, ban in ipairs(list or {}) do
+        for _, id in ipairs(ban.ids or {}) do bansByIdentifier[id] = ban end
+        for _, token in ipairs(ban.tokens or {}) do bansByToken[token] = ban end
+    end
+end
+
+local function banActive(ban)
+    return ban and (ban.expires == nil or ban.expires == json.null or ban.expires > os.time())
+end
+
+function FVX.findBan(src)
+    for _, id in ipairs(GetPlayerIdentifiers(src)) do
+        if banActive(bansByIdentifier[id]) then return bansByIdentifier[id] end
+    end
+    for _, token in ipairs(FVX.tokens(src)) do
+        if banActive(bansByToken[token]) then return bansByToken[token] end
+    end
+    return nil
+end
+
+function FVX.banMessage(ban)
+    local message = (FVX.settings and FVX.settings.banMessage) or 'Tu es banni de ce serveur.'
+    message = message .. '\nRaison : ' .. tostring(ban.reason or '?')
+    if ban.expires and ban.expires ~= json.null then message = message .. '\nFin : ' .. os.date('%d/%m/%Y %H:%M', ban.expires) end
+    if ban.id then message = message .. ('\nRéférence : #%s'):format(ban.id) end
+    return message
+end
+
+-- Ban right now (detection) without waiting for the panel: kept until the panel's list replaces it.
+function FVX.localBan(src, reason)
+    local ban = { id = nil, reason = reason, ids = FVX.identifiers(src), tokens = FVX.tokens(src) }
+    for _, id in ipairs(ban.ids) do bansByIdentifier[id] = ban end
+    for _, token in ipairs(ban.tokens) do bansByToken[token] = ban end
+    return ban
+end
+
+AddEventHandler('playerConnecting', function(_, _, deferrals)
+    local src = source
+    deferrals.defer()
+    Wait(0)
+    local ban = FVX.findBan(src)
+    if ban then
+        deferrals.done(FVX.banMessage(ban))
+    else
+        deferrals.done()
+    end
+end)
+
+local function applySecurity(security)
+    FVX.secRev = security.rev or 0
+    FVX.settings = security.anticheat
+    indexBans(security.bans)
+    SaveResourceFile(RESOURCE, BANS_FILE, json.encode(security.bans or {}), -1)
+    if FVX.onSettings then FVX.onSettings(FVX.settings) end
+    -- A ban added from the panel drops the player if they are in game.
+    for _, id in ipairs(GetPlayers()) do
+        local ban = FVX.findBan(tonumber(id))
+        if ban then DropPlayer(id, FVX.banMessage(ban)) end
+    end
+end
+
+-- ---- snapshot ----
+
+local function playerState(src)
+    local entry = { id = src, name = GetPlayerName(src) or '?', ping = GetPlayerPing(src), session = FVX.sessions[src] }
+    local ped = GetPlayerPed(src)
+    if ped and ped ~= 0 and DoesEntityExist(ped) then
+        local c = GetEntityCoords(ped)
+        entry.pos = { math.floor(c.x * 10) / 10, math.floor(c.y * 10) / 10, math.floor(c.z * 10) / 10 }
+        entry.heading = math.floor(GetEntityHeading(ped))
+        entry.health = GetEntityHealth(ped)
+        entry.armour = GetPedArmour(ped)
+    end
+    local info = FVX.client[src]
+    if info then
+        entry.zone = info.zone
+        entry.vehicle = info.vehicle
+    end
+    local state = Player(src).state
+    entry.talking = state['fvx:talking'] == true
+    -- pma-voice
+    if type(state.radioChannel) == 'number' and state.radioChannel > 0 then entry.radio = state.radioChannel end
+    if type(state.callChannel) == 'number' and state.callChannel > 0 then entry.call = state.callChannel end
+    return entry
+end
+
 local function snapshot()
     local players = {}
-    for _, id in ipairs(GetPlayers()) do
-        local src = tonumber(id)
-        players[#players + 1] = { id = src, name = GetPlayerName(src) or '?', ping = GetPlayerPing(src), session = sessions[src] }
-    end
+    for _, id in ipairs(GetPlayers()) do players[#players + 1] = playerState(tonumber(id)) end
     local resources = {}
     for i = 0, GetNumResources() - 1 do
         local name = GetResourceByFindIndex(i)
@@ -102,6 +222,23 @@ local function snapshot()
         players = players,
         resources = resources
     }
+end
+
+-- ---- screenshots (screenshot-basic), analysed by the panel's AI ----
+
+-- cb(ok, message) once uploaded (or failed).
+function FVX.screenshot(src, reason, cb)
+    cb = cb or function() end
+    if GetResourceState('screenshot-basic') ~= 'started' then return cb(false, 'screenshot-basic n\'est pas démarré sur ce serveur') end
+    local name, session = GetPlayerName(src), FVX.sessions[src]
+    if not name then return cb(false, 'Joueur déconnecté') end
+    exports['screenshot-basic']:requestClientScreenshot(src, { encoding = 'jpg', quality = 0.6 }, function(err, data)
+        if err or type(data) ~= 'string' then return cb(false, 'Capture impossible : ' .. tostring(err)) end
+        local body = json.encode({ session = session, target = src, name = name, reason = reason, image = data })
+        PerformHttpRequest(URL .. '/api/fivem/agent/screenshot', function(status)
+            cb(status == 200, status == 200 and 'Capture envoyée' or ('Le panel a refusé la capture (HTTP %s)'):format(status))
+        end, 'POST', body, HEADERS)
+    end)
 end
 
 -- ---- actions from the panel: each returns ok, message ----
@@ -139,6 +276,12 @@ local handlers = {
         dirty = true
         return true, 'Liste des ressources rechargée'
     end,
+    screenshot = function(p)
+        if not online(p.target) then return false, 'Joueur déconnecté' end
+        if GetResourceState('screenshot-basic') ~= 'started' then return false, 'Installe et démarre screenshot-basic sur le serveur FiveM' end
+        FVX.screenshot(p.target, 'manual')
+        return true, 'Capture en cours'
+    end,
     console = function(p)
         if not ALLOW_CONSOLE then return false, 'Console désactivée sur ce serveur (fiverax_console 0)' end
         ExecuteCommand(p.command)
@@ -171,8 +314,8 @@ end
 local function call()
     local sentEvents, sentConsole, sentResults = events, consoleLines, results
     events, consoleLines, results = {}, {}, {}
-    local body = { version = VERSION, boot = not booted or nil, events = sentEvents, console = sentConsole, results = sentResults }
-    if dirty or os.time() - lastState >= STATE_EVERY then
+    local body = { version = VERSION, boot = not booted or nil, secRev = FVX.secRev, events = sentEvents, console = sentConsole, results = sentResults }
+    if dirty or watched or os.time() - lastState >= STATE_EVERY then
         body.state = snapshot()
         dirty, lastState = false, os.time()
     end
@@ -180,7 +323,7 @@ local function call()
     local p = promise.new()
     PerformHttpRequest(URL .. '/api/fivem/agent', function(status, response)
         p:resolve({ status = status, body = response })
-    end, 'POST', json.encode(body), { ['Content-Type'] = 'application/json', ['Authorization'] = 'Bearer ' .. TOKEN })
+    end, 'POST', json.encode(body), HEADERS)
     local res = Citizen.Await(p)
 
     if res.status < 200 or res.status >= 300 then
@@ -202,6 +345,8 @@ local function call()
     booted, warnedAuth = true, false
     local data = json.decode(res.body or '') or {}
     if type(data.interval) == 'number' then interval = math.max(1, math.min(60, data.interval)) end
+    watched = data.watch == true
+    if type(data.security) == 'table' then applySecurity(data.security) end
     local commands = data.commands or {}
     for _, command in ipairs(commands) do results[#results + 1] = run(command) end
     -- Report the results right away rather than at the next tick.
@@ -215,6 +360,9 @@ CreateThread(function()
         return
     end
     math.randomseed(os.time())
+    -- Bans of the previous run, enforced until the panel answers.
+    local cached = LoadResourceFile(RESOURCE, BANS_FILE)
+    if cached then indexBans(json.decode(cached)) end
     -- Players already connected (the resource was restarted).
     for _, id in ipairs(GetPlayers()) do playerJoined(tonumber(id)) end
     print(('[fiverax] Agent %s relié à %s'):format(VERSION, URL))

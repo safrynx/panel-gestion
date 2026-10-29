@@ -1,16 +1,17 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { Megaphone, MessageSquare, UserX } from "lucide-react";
+import { Ban, Camera, Megaphone, MessageSquare, UserX } from "lucide-react";
 import type { LivePlayer, LiveState } from "@/lib/agent";
 import { formatDuration } from "@/lib/format";
 import { useServerPaths, useUI } from "@/app/ui";
 import { useCommand, usePolling } from "../use-command";
+import { useBanDialog } from "../security-actions";
 
 type Props = {
   initial: LiveState;
   settingsHref: string | null;
-  can: { message: boolean; kick: boolean; announce: boolean };
+  can: { message: boolean; kick: boolean; announce: boolean; screenshot: boolean; ban: boolean };
 };
 
 /** "il y a 12 s", computed on the client only (the server's clock would not match at hydration). */
@@ -65,6 +66,7 @@ export default function LiveView({ initial, settingsHref, can }: Props) {
   const paths = useServerPaths();
   const { ask } = useUI();
   const { send, busy } = useCommand();
+  const { ban } = useBanDialog();
   const { data: live, refresh } = usePolling<LiveState>(paths.api("live"), initial, 4000);
   const now = useNow(live);
   const [query, setQuery] = useState("");
@@ -127,7 +129,9 @@ export default function LiveView({ initial, settingsHref, can }: Props) {
                     <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
                       <span style={{ display: "inline-flex", gap: 6 }}>
                         {can.message && <button className="ibtn" title="Message privé" disabled={busy} onClick={() => message(p)}><MessageSquare size={14} /></button>}
+                        {can.screenshot && <button className="ibtn" title="Capture d'écran (analysée par l'IA)" disabled={busy} onClick={() => send("screenshot", { target: p.id }, `Capture de ${p.name} envoyée à l'analyse`)}><Camera size={14} /></button>}
                         {can.kick && <button className="ibtn bad" title="Kick" disabled={busy} onClick={() => kick(p)}><UserX size={14} /></button>}
+                        {can.ban && p.playerId && <button className="ibtn bad" title="Bannir" onClick={() => ban(p.playerId as number, p.name)}><Ban size={14} /></button>}
                       </span>
                     </td>
                   </tr>

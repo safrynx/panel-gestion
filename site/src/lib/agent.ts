@@ -3,6 +3,8 @@ import { auditStmt } from "./audit";
 import { db, stmt, type Stmt } from "./db";
 import { ingestFivemEvent } from "./fivem";
 import type { Permission } from "./permissions";
+import { activeBansForAgent, getSecuritySettings, recordDetection } from "./security";
+import { AC_ACTIONS, type AnticheatSettings } from "./security-config";
 
 /**
  * Two-way FiveM agent (resource `fiverax_agent`).
@@ -13,7 +15,10 @@ import type { Permission } from "./permissions";
  * before the next call. Polling works on any host (Vercel included): the agent opens the connection, never the site.
  *
  * Players are identified by their Rockstar license (stable across names and Discord accounts). IP identifiers are
- * never stored.
+ * never stored; hardware tokens are, as bans match on them.
+ *
+ * Security: the agent sends the security rev it knows (`secRev`); when it is stale the answer carries the anticheat
+ * settings and the active bans. Detections come as events; a "ban" detection bans the player here.
  */
 
 /** Lua's json.encode turns an empty table into `{}`: accept it as an empty list. */
@@ -30,10 +35,19 @@ export const agentRequestSchema = z.object({
   version: z.string().max(20).optional(),
   /** First call after the resource started: sessions still open from a previous run are closed. */
   boot: z.boolean().optional(),
+  /** Security rev the agent has loaded (0: none yet). */
+  secRev: z.number().int().nonnegative().optional(),
   events: list(
     z.discriminatedUnion("type", [
-      z.object({ type: z.literal("join"), session, name: z.string().max(100), identifiers: list(z.string().max(120), 30), timestamp }),
-      z.object({ type: z.literal("leave"), session, reason: z.string().max(200).optional(), timestamp })
+      z.object({
+        type: z.literal("join"), session, name: z.string().max(100), identifiers: list(z.string().max(120), 30),
+        tokens: list(z.string().max(200), 30).optional(), timestamp
+      }),
+      z.object({ type: z.literal("leave"), session, reason: z.string().max(200).optional(), timestamp }),
+      z.object({
+        type: z.literal("detection"), session: session.optional(), name: z.string().max(100), kind: z.string().regex(/^[a-z_]{2,40}$/),
+        action: z.enum(AC_ACTIONS), details: z.record(z.string(), z.unknown()).optional(), timestamp
+      })
     ]),
     300
   ),
@@ -44,7 +58,23 @@ export const agentRequestSchema = z.object({
       uptime: z.number().nonnegative().transform(Math.floor),
       build: z.string().max(40).optional(),
       players: list(
-        z.object({ id: z.number().int(), name: z.string().max(100), session: session.optional(), ping: z.number().transform(Math.floor) }),
+        z.object({
+          id: z.number().int(),
+          name: z.string().max(100),
+          session: session.optional(),
+          ping: z.number().transform(Math.floor),
+          /** Position [x, y, z] and heading, for the map. */
+          pos: z.array(z.number()).length(3).optional(),
+          heading: z.number().optional(),
+          vehicle: z.string().max(60).optional(),
+          health: z.number().optional(),
+          armour: z.number().optional(),
+          /** Voice: talking now, radio frequency and call channel (pma-voice). */
+          talking: z.boolean().optional(),
+          radio: z.number().optional(),
+          call: z.number().optional(),
+          zone: z.string().max(80).optional()
+        }),
         2048
       ),
       resources: list(z.object({ name: z.string().max(100), state: z.string().max(20) }), 3000)
@@ -56,7 +86,9 @@ export const agentRequestSchema = z.object({
 
 export type AgentRequest = z.infer<typeof agentRequestSchema>;
 export type AgentCommand = { id: number; kind: CommandKind; payload: Record<string, unknown> };
-export type AgentResponse = { ok: true; commands: AgentCommand[]; interval: number };
+export type AgentSecurity = { rev: number; anticheat: AnticheatSettings; bans: Awaited<ReturnType<typeof activeBansForAgent>> };
+/** `watch`: someone looks at the live pages, send a snapshot on every call (map, voice). */
+export type AgentResponse = { ok: true; commands: AgentCommand[]; interval: number; watch: boolean; security?: AgentSecurity };
 
 /** The agent is "online" while it called less than this long ago (its slowest pace is IDLE_INTERVAL). */
 export const ONLINE_MS = 30_000;
@@ -101,12 +133,14 @@ async function playerJoined(serverId: string, e: Extract<AgentRequest["events"][
   if (!license) return;
   const at = iso(new Date(e.timestamp * 1000));
   const row = await db.get<{ id: number }>(
-    `INSERT INTO players (server_id, license, name, discord_id, identifiers_json, first_seen_at, last_seen_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO players (server_id, license, name, discord_id, identifiers_json, tokens_json, first_seen_at, last_seen_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT (server_id, license) DO UPDATE SET name = excluded.name, discord_id = COALESCE(excluded.discord_id, players.discord_id),
-       identifiers_json = excluded.identifiers_json, last_seen_at = excluded.last_seen_at
+       identifiers_json = excluded.identifiers_json,
+       tokens_json = CASE WHEN excluded.tokens_json = '[]' THEN players.tokens_json ELSE excluded.tokens_json END,
+       last_seen_at = excluded.last_seen_at
      RETURNING id`,
-    [serverId, license, e.name || "?", discordId, JSON.stringify(kept), at, at]
+    [serverId, license, e.name || "?", discordId, JSON.stringify(kept), JSON.stringify(e.tokens ?? []), at, at]
   );
   if (!row) return;
   await db.run("INSERT OR IGNORE INTO player_sessions (server_id, player_id, external_id, started_at) VALUES (?, ?, ?, ?)", [
@@ -131,12 +165,25 @@ async function playerLeft(serverId: string, e: Extract<AgentRequest["events"][nu
   if (open.discord_id) await ingestFivemEvent(serverId, { event: "session_end", discordId: open.discord_id, sessionId: e.session, timestamp: e.timestamp });
 }
 
+/** The player of an agent session (null when the join was never reported). */
+export async function playerOfSession(serverId: string, session: string | undefined): Promise<number | null> {
+  if (!session) return null;
+  const row = await db.get<{ player_id: number }>("SELECT player_id FROM player_sessions WHERE external_id = ?", [sessionKey(serverId, session)]);
+  return row?.player_id ?? null;
+}
+
+async function detected(serverId: string, e: Extract<AgentRequest["events"][number], { type: "detection" }>): Promise<void> {
+  const playerId = await playerOfSession(serverId, e.session);
+  await recordDetection(serverId, { playerId, playerName: e.name || "?", kind: e.kind, details: e.details ?? {}, action: e.action }, new Date(e.timestamp * 1000));
+}
+
 /** Handle one call of a server's agent and hand it the queued actions. */
 export async function handleAgentCall(serverId: string, req: AgentRequest, now = new Date()): Promise<AgentResponse> {
   if (req.boot) await closeOpenSessions(serverId, now);
   for (const e of req.events) {
     if (e.type === "join") await playerJoined(serverId, e);
-    else await playerLeft(serverId, e);
+    else if (e.type === "leave") await playerLeft(serverId, e);
+    else await detected(serverId, e);
   }
 
   const writes: Stmt[] = [
@@ -170,17 +217,24 @@ export async function handleAgentCall(serverId: string, req: AgentRequest, now =
   }
   writes.push(
     stmt("UPDATE fivem_commands SET status = 'sent', sent_at = ? WHERE server_id = ? AND status = 'pending' RETURNING id, kind, payload", [iso(now), serverId]),
-    stmt("SELECT watched_at FROM fivem_state WHERE server_id = ?", [serverId])
+    stmt("SELECT watched_at FROM fivem_state WHERE server_id = ?", [serverId]),
+    stmt("SELECT rev FROM security_settings WHERE server_id = ?", [serverId])
   );
   const results = await db.batch(writes);
-  const claimed = results[results.length - 2].rows;
-  const watchedAt = results[results.length - 1].rows[0]?.watched_at as string | null | undefined;
+  const claimed = results[results.length - 3].rows;
+  const watchedAt = results[results.length - 2].rows[0]?.watched_at as string | null | undefined;
+  const rev = Number(results[results.length - 1].rows[0]?.rev ?? 1);
 
   const commands = claimed
     .map((row) => ({ id: Number(row.id), kind: row.kind as CommandKind, payload: JSON.parse(String(row.payload)) as Record<string, unknown> }))
     .sort((a, b) => a.id - b.id);
   const watched = Boolean(watchedAt && now.getTime() - new Date(watchedAt).getTime() < WATCH_MS);
-  return { ok: true, commands, interval: watched || commands.length ? FAST_INTERVAL : IDLE_INTERVAL };
+  const response: AgentResponse = { ok: true, commands, interval: watched || commands.length ? FAST_INTERVAL : IDLE_INTERVAL, watch: watched };
+  if (req.secRev !== rev) {
+    const [settings, bans] = await Promise.all([getSecuritySettings(serverId), activeBansForAgent(serverId, now)]);
+    response.security = { rev: settings.rev, anticheat: settings.anticheat, bans };
+  }
+  return response;
 }
 
 // ---- actions queued from the panel ----
@@ -198,6 +252,7 @@ export const COMMANDS = {
     schema: z.object({ action: z.enum(["start", "stop", "restart"]), name: z.string().regex(/^[\w.\-[\]]{1,100}$/) })
   },
   refresh: { permission: "resources", schema: z.object({}) },
+  screenshot: { permission: "screenshot", schema: z.object({ target }) },
   console: { permission: "console", schema: z.object({ command: text(500) }) }
 } satisfies Record<string, { permission: Permission; schema: z.ZodTypeAny }>;
 
@@ -210,6 +265,7 @@ const AUDIT_ACTION: Record<CommandKind, string> = {
   announce: "announce",
   resource: "resource",
   refresh: "resource",
+  screenshot: "player_screenshot",
   console: "console_command"
 };
 
@@ -259,6 +315,15 @@ export type LivePlayer = {
   discordId: string | null;
   connectedAt: string | null;
   staff: { username: string; grade: string } | null;
+  pos: [number, number, number] | null;
+  heading: number;
+  vehicle: string | null;
+  health: number | null;
+  armour: number | null;
+  talking: boolean;
+  radio: number | null;
+  call: number | null;
+  zone: string | null;
 };
 
 export type LiveState = {
@@ -320,7 +385,16 @@ export async function getLiveState(serverId: string, opts: { watch?: boolean } =
           playerId: k?.player_id ?? null,
           discordId: k?.discord_id ?? null,
           connectedAt: k?.started_at ?? null,
-          staff: k?.username ? { username: k.username, grade: k.grade ?? "" } : null
+          staff: k?.username ? { username: k.username, grade: k.grade ?? "" } : null,
+          pos: p.pos ? [p.pos[0], p.pos[1], p.pos[2]] : null,
+          heading: p.heading ?? 0,
+          vehicle: p.vehicle || null,
+          health: p.health ?? null,
+          armour: p.armour ?? null,
+          talking: Boolean(p.talking),
+          radio: p.radio || null,
+          call: p.call || null,
+          zone: p.zone || null
         };
       })
     : [];

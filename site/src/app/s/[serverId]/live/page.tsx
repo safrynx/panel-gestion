@@ -15,7 +15,7 @@ export default async function LivePage({ params }: { params: Promise<{ serverId:
       <LiveView
         initial={live}
         settingsHref={user.owner ? `/s/${server.id}/settings` : null}
-        can={{ message: can(user, "player_message"), kick: can(user, "player_kick"), announce: can(user, "announce") }}
+        can={{ message: can(user, "player_message"), kick: can(user, "player_kick"), announce: can(user, "announce"), screenshot: can(user, "screenshot"), ban: can(user, "ban") }}
       />
     </Shell>
   );

@@ -2,6 +2,9 @@ import { z } from "zod";
 import { clearBotHeartbeat, setServerStatus } from "./bot-status";
 import { storePlaytimeTotals } from "./playtime";
 import { storeGuildRoles } from "./roles";
+import { invalidateConfig } from "./config";
+import { db, stmt } from "./db";
+import { getSecuritySettings, recordIncident } from "./security";
 import { getServerByGuild, listServers, type Server } from "./servers";
 import { syncStaffMembers, upsertStaffMember } from "./sync";
 import { closeAllVoiceSessions, closeVoiceSession, moveVoiceSession, openVoiceSession, reconcileVoiceSessions } from "./voice";
@@ -59,6 +62,20 @@ export const playtimeSchema = z.object({
   totals: z.array(z.object({ discordId: snowflake, seconds: z.number().int().min(0).max(10_000_000_000) })).max(100_000)
 });
 
+/** Something the anti-raid did on Discord (see bot/src/antiraid.ts). */
+export const incidentSchema = z.object({
+  guildId: snowflake,
+  kind: z.string().regex(/^[a-z_]{2,40}$/),
+  actorId: snowflake.nullable(),
+  actorName: z.string().max(200).nullable(),
+  actorBot: z.boolean().default(false),
+  summary: z.string().max(500),
+  details: z.record(z.string(), z.unknown()).default({}),
+  actions: z.array(z.object({ type: z.string().max(60), ok: z.boolean(), detail: z.string().max(300).optional() })).max(200).default([]),
+  /** Roles taken from the actor (derank), so the panel can give them back. */
+  removedRoles: z.array(snowflake).max(250).default([])
+});
+
 type Sync = z.infer<typeof syncSchema>;
 type Member = z.infer<typeof memberOfSync>;
 type MemberEvent = z.infer<typeof memberSchema>;
@@ -82,21 +99,45 @@ async function markAlive(server: Server, topRolePosition?: number | null): Promi
   if (typeof topRolePosition === "number") await setServerStatus(server.id, "top_role_position", String(topRolePosition));
 }
 
-/** Guilds the bot should watch: those of the registered servers. */
+/** Guilds the bot should watch: those of the registered servers, with their anti-raid settings. */
 export async function registeredGuilds() {
-  const servers = await listServers();
-  return { guilds: servers.filter((s) => s.guildId).map((s) => ({ guildId: s.guildId as string, serverId: s.id, name: s.name })) };
+  const servers = (await listServers()).filter((s) => s.guildId);
+  const guilds = [];
+  for (const s of servers) {
+    guilds.push({ guildId: s.guildId as string, serverId: s.id, name: s.name, antiraid: (await getSecuritySettings(s.id)).antiraid });
+  }
+  return { guilds };
 }
 
+/** The answer carries the anti-raid settings, so a change made on the panel reaches the bot within a minute. */
 export async function recordHeartbeat(data: Heartbeat) {
-  let known = 0;
+  const antiraid: Record<string, unknown> = {};
   for (const guild of data.guilds) {
     const server = await getServerByGuild(guild.guildId);
     if (!server) continue;
     await markAlive(server, guild.topRolePosition);
-    known++;
+    antiraid[guild.guildId] = (await getSecuritySettings(server.id)).antiraid;
   }
-  return { servers: known };
+  return { servers: Object.keys(antiraid).length, antiraid };
+}
+
+export async function applyIncident(data: z.infer<typeof incidentSchema>) {
+  const server = await getServerByGuild(data.guildId);
+  if (!server) return IGNORED;
+  const { guildId: _guild, ...incident } = data;
+  void _guild;
+  // Deleted roles were recreated: they have new ids, which the grades, averts and access rules must follow.
+  const remaps = Array.isArray(incident.details.remaps) ? (incident.details.remaps as { from?: unknown; to?: unknown }[]) : [];
+  const valid = remaps.filter((r): r is { from: string; to: string } => typeof r.from === "string" && typeof r.to === "string" && /^\d{17,20}$/.test(r.from) && /^\d{17,20}$/.test(r.to));
+  if (valid.length) {
+    await db.batch(valid.flatMap(({ from, to }) => [
+      stmt("UPDATE grade_roles SET role_id = ? WHERE server_id = ? AND role_id = ?", [to, server.id, from]),
+      stmt("UPDATE warn_roles SET role_id = ? WHERE server_id = ? AND role_id = ?", [to, server.id, from]),
+      stmt("UPDATE OR IGNORE panel_access SET discord_id = ? WHERE server_id = ? AND kind = 'role' AND discord_id = ?", [to, server.id, from])
+    ]));
+    invalidateConfig(server.id);
+  }
+  return { id: await recordIncident(server.id, incident) };
 }
 
 /** Full snapshot of one guild: roles, all members, and who is in voice right now. */

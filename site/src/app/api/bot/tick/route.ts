@@ -12,7 +12,7 @@ export const maxDuration = 300;
  */
 export function POST(req: NextRequest) {
   return handleBotRequest(req, null, async () => {
-    const { staleFivemClosed, stalePlayersClosed, reviewDue } = await runMaintenance();
+    const { staleFivemClosed, stalePlayersClosed, screenshotsPruned, reviewDue } = await runMaintenance();
     if (reviewDue.length) {
       after(async () => {
         for (const server of reviewDue) {
@@ -20,6 +20,6 @@ export function POST(req: NextRequest) {
         }
       });
     }
-    return { staleFivemClosed, stalePlayersClosed, reviewDue: reviewDue.map((s) => s.id) };
+    return { staleFivemClosed, stalePlayersClosed, screenshotsPruned, reviewDue: reviewDue.map((s) => s.id) };
   });
 }

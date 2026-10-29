@@ -142,6 +142,12 @@ export function describeApiError(data: { error?: string; discordStatus?: number;
     case "confirm_mismatch": return "Le nom tapé ne correspond pas : rien n'a été supprimé.";
     case "agent_offline": return "Le serveur FiveM ne répond pas (agent arrêté ou serveur éteint).";
     case "player_offline": return "Ce joueur n'est plus connecté.";
+    case "unknown_player": return "Joueur introuvable.";
+    case "unknown_ban": return "Ce ban n'existe plus ou est déjà levé.";
+    case "unknown_incident": return "Incident introuvable.";
+    case "nothing_to_restore": return "Rien à rendre : les rôles ont déjà été rendus.";
+    case "unknown_screenshot": return "Capture introuvable (supprimée après 30 jours).";
+    case "validation": return "Valeurs invalides : vérifie le formulaire.";
     default: return `Erreur : ${data.error ?? status}`;
   }
 }

@@ -424,6 +424,87 @@ const migrations: { name: string; sql: string }[] = [
       );
       CREATE INDEX IF NOT EXISTS idx_fivem_console ON fivem_console(server_id, id)
     `
+  },
+  {
+    // Security: settings of the anticheat (sent to the FiveM agent) and of the Discord anti-raid (sent to the bot),
+    // bans enforced by the agent at connection, anticheat detections, screenshots with their AI verdict, and the
+    // incidents the bot handled on Discord. `rev` changes on every settings / ban change so the agent reloads.
+    name: "016_security",
+    sql: `
+      CREATE TABLE IF NOT EXISTS security_settings (
+        server_id TEXT PRIMARY KEY,
+        anticheat_json TEXT,
+        antiraid_json TEXT,
+        rev INTEGER NOT NULL DEFAULT 1,
+        updated_at TEXT
+      );
+      CREATE TABLE IF NOT EXISTS bans (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        server_id TEXT NOT NULL,
+        player_id INTEGER,
+        name TEXT NOT NULL,
+        identifiers_json TEXT NOT NULL DEFAULT '[]',
+        tokens_json TEXT NOT NULL DEFAULT '[]',
+        reason TEXT NOT NULL,
+        source TEXT NOT NULL DEFAULT 'manual',
+        detection_id INTEGER,
+        author_discord_id TEXT,
+        author_name TEXT,
+        created_at TEXT NOT NULL,
+        expires_at TEXT,
+        revoked_at TEXT,
+        revoked_by TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_bans_server ON bans(server_id, revoked_at, id);
+      CREATE INDEX IF NOT EXISTS idx_bans_player ON bans(server_id, player_id);
+      CREATE TABLE IF NOT EXISTS ac_detections (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        server_id TEXT NOT NULL,
+        player_id INTEGER,
+        player_name TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        details_json TEXT NOT NULL DEFAULT '{}',
+        action TEXT NOT NULL,
+        screenshot_id INTEGER,
+        at TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open',
+        reviewed_by TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_ac_detections ON ac_detections(server_id, id);
+      CREATE INDEX IF NOT EXISTS idx_ac_detections_player ON ac_detections(server_id, player_id, id);
+      CREATE TABLE IF NOT EXISTS ac_screenshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        server_id TEXT NOT NULL,
+        player_id INTEGER,
+        player_name TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        image BLOB NOT NULL,
+        mime TEXT NOT NULL,
+        ai_verdict TEXT NOT NULL DEFAULT 'pending',
+        ai_score INTEGER,
+        ai_summary TEXT,
+        requested_by TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_ac_screenshots ON ac_screenshots(server_id, id);
+      CREATE TABLE IF NOT EXISTS security_incidents (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        server_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        actor_id TEXT,
+        actor_name TEXT,
+        actor_bot INTEGER NOT NULL DEFAULT 0,
+        summary TEXT NOT NULL,
+        details_json TEXT NOT NULL DEFAULT '{}',
+        actions_json TEXT NOT NULL DEFAULT '[]',
+        removed_roles_json TEXT NOT NULL DEFAULT '[]',
+        at TEXT NOT NULL,
+        restored_at TEXT,
+        restored_by TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_security_incidents ON security_incidents(server_id, id);
+      ALTER TABLE players ADD COLUMN tokens_json TEXT NOT NULL DEFAULT '[]'
+    `
   }
 ];
 

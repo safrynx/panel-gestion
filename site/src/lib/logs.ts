@@ -9,7 +9,8 @@ export const LOG_GROUPS: Record<string, { label: string; actions: string[] }> = 
   follow: { label: "Commentaires & pastilles", actions: ["note_create", "badge_create", "badge_resolve"] },
   access: { label: "Accès & rôles", actions: ["access_add", "access_remove", "access_permissions", "grade_role_add", "grade_role_remove", "warn_role_set"] },
   sync: { label: "Synchro, IA & reset", actions: ["staff_sync", "review_generate", "counters_reset"] },
-  fivem: { label: "Serveur FiveM", actions: ["player_kick", "player_message", "announce", "resource", "console_command"] },
+  fivem: { label: "Serveur FiveM", actions: ["player_kick", "player_message", "announce", "resource", "console_command", "player_screenshot"] },
+  security: { label: "Sécurité", actions: ["player_ban", "player_unban", "anticheat_config", "antiraid_config", "antiraid_restore"] },
   server: { label: "Serveur", actions: ["server_create", "server_update", "owner_add", "owner_remove", "fivem_token_rotate"] }
 };
 
@@ -42,7 +43,13 @@ const ACTION_LABELS: Record<string, { label: string; tone: LogTone }> = {
   player_message: { label: "Message joueur", tone: "neutral" },
   announce: { label: "Annonce", tone: "info" },
   resource: { label: "Ressource", tone: "warn" },
-  console_command: { label: "Console", tone: "warn" }
+  console_command: { label: "Console", tone: "warn" },
+  player_screenshot: { label: "Capture d'écran", tone: "neutral" },
+  player_ban: { label: "Ban", tone: "danger" },
+  player_unban: { label: "Déban", tone: "up" },
+  anticheat_config: { label: "Réglages anticheat", tone: "warn" },
+  antiraid_config: { label: "Réglages anti-raid", tone: "warn" },
+  antiraid_restore: { label: "Rôles rendus", tone: "up" }
 };
 
 const RESOURCE_VERBS: Record<string, string> = { start: "Démarrage", stop: "Arrêt", restart: "Redémarrage", refresh: "Rechargement de la liste des ressources" };
@@ -103,6 +110,18 @@ function describe(action: string, d: Record<string, unknown>): string {
       return `${RESOURCE_VERBS[String(d.action)] ?? d.action}${d.name ? ` de ${d.name}` : ""}`;
     case "console_command":
       return `> ${String(d.command ?? "").slice(0, 200)}`;
+    case "player_screenshot":
+      return `${d.player ?? `#${d.target}`}`;
+    case "player_ban":
+      return `${d.player ?? "?"}${reason}${d.expiresAt ? ` · jusqu'au ${new Date(String(d.expiresAt)).toLocaleString("fr-FR", { timeZone: process.env.APP_TIMEZONE || "Europe/Paris" })}` : " · définitif"}${d.source && d.source !== "manual" ? ` (${d.source === "ai" ? "IA" : "anticheat"})` : ""}`;
+    case "player_unban":
+      return `${d.player ?? "?"}`;
+    case "anticheat_config":
+      return "Réglages de l'anticheat modifiés";
+    case "antiraid_config":
+      return "Réglages de l'anti-raid modifiés";
+    case "antiraid_restore":
+      return `${d.roles ?? 0} rôle(s) rendu(s) après une sanction de l'anti-raid`;
     case "staff_sync":
       return `${d.total ?? 0} membres · +${d.inserted ?? 0} / ~${d.updated ?? 0} / −${d.markedLeft ?? 0}`;
     default:

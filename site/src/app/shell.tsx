@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { ChevronsUpDown, Contact, KeyRound, LayoutDashboard, type LucideIcon, Radio, ScrollText, Server as ServerIcon, Settings, TrendingUp, Users } from "lucide-react";
+import { Ban, ChevronsUpDown, Contact, KeyRound, LayoutDashboard, type LucideIcon, Map as MapIcon, Radio, ScrollText, Server as ServerIcon, Settings, ShieldAlert, ShieldCheck, TrendingUp, Users } from "lucide-react";
 import { can, isOwner } from "@/lib/auth";
 import type { Server } from "@/lib/servers";
 import type { Identity, SessionUser } from "@/lib/types";
@@ -8,7 +8,7 @@ import { Mark } from "./brand";
 import LogoutButton from "./logout-button";
 import { GuildIcon } from "./new-server-form";
 
-export type NavKey = "dashboard" | "live" | "players" | "server" | "staff" | "report" | "logs" | "admin" | "settings";
+export type NavKey = "dashboard" | "live" | "map" | "players" | "server" | "anticheat" | "bans" | "antiraid" | "staff" | "report" | "logs" | "admin" | "settings";
 
 export type NavItem = { href: string; label: string; icon: LucideIcon; active?: boolean };
 export type NavSection = { label: string; items: NavItem[] };
@@ -21,7 +21,11 @@ export default function Shell({ user, server, active, children }: Props) {
   const item = (key: NavKey, href: string, label: string, icon: LucideIcon): NavItem => ({ href, label, icon, active: key === active });
   const fivem = [
     ...(can(user, "view_live")
-      ? [item("live", `${base}/live`, "En direct", Radio), item("players", `${base}/players`, "Joueurs", Contact)]
+      ? [
+          item("live", `${base}/live`, "En direct", Radio),
+          item("map", `${base}/map`, "Carte & vocal", MapIcon),
+          item("players", `${base}/players`, "Joueurs", Contact)
+        ]
       : []),
     ...(can(user, "resources") || can(user, "console") ? [item("server", `${base}/server`, "Ressources & console", ServerIcon)] : [])
   ];
@@ -34,6 +38,16 @@ export default function Shell({ user, server, active, children }: Props) {
       ]
     },
     ...(fivem.length ? [{ label: "Serveur FiveM", items: fivem }] : []),
+    ...(can(user, "view_security")
+      ? [{
+          label: "Sécurité",
+          items: [
+            item("anticheat", `${base}/anticheat`, "Anticheat", ShieldAlert),
+            item("bans", `${base}/bans`, "Bans", Ban),
+            item("antiraid", `${base}/antiraid`, "Anti-raid Discord", ShieldCheck)
+          ]
+        }]
+      : []),
     {
       label: "Staff",
       items: [

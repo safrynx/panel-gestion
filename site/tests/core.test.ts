@@ -37,6 +37,9 @@ type Mods = {
   servers: typeof import("../src/lib/servers");
   agent: typeof import("../src/lib/agent");
   players: typeof import("../src/lib/players");
+  security: typeof import("../src/lib/security");
+  securityConfig: typeof import("../src/lib/security-config");
+  vision: typeof import("../src/lib/vision");
 };
 let m: Mods;
 let db: Mods["db"]["db"];
@@ -62,7 +65,10 @@ before(async () => {
     playtime: await import("../src/lib/playtime"),
     servers: await import("../src/lib/servers"),
     agent: await import("../src/lib/agent"),
-    players: await import("../src/lib/players")
+    players: await import("../src/lib/players"),
+    security: await import("../src/lib/security"),
+    securityConfig: await import("../src/lib/security-config"),
+    vision: await import("../src/lib/vision")
   };
   db = m.db.db;
 });
@@ -452,7 +458,7 @@ test("database: batches are atomic, migrations are idempotent and safe to run co
   const before = (await client.execute("SELECT COUNT(*) AS n FROM schema_migrations")).rows[0].n;
   await Promise.all([runMigrations(client), runMigrations(client)]);
   assert.equal((await client.execute("SELECT COUNT(*) AS n FROM schema_migrations")).rows[0].n, before);
-  assert.equal(Number(before), 15);
+  assert.equal(Number(before), 16);
 });
 
 test("bot API: sync snapshot, member event, voice events, heartbeat, playtime, shutdown", async () => {
@@ -655,7 +661,8 @@ test("bot API: routes each guild to its server, ignores unknown guilds, heartbea
   );
 
   await m.status.clearBotHeartbeat();
-  assert.deepEqual(await api.recordHeartbeat({ guilds: [{ guildId: G2, topRolePosition: 7 }, { guildId: "599999999999999999" }] }), { servers: 1 });
+  const beat = await api.recordHeartbeat({ guilds: [{ guildId: G2, topRolePosition: 7 }, { guildId: "599999999999999999" }] });
+  assert.deepEqual([beat.servers, Object.keys(beat.antiraid)], [1, [G2]]); // settings only for known guilds
   assert.equal((await m.status.getBotStatus(t.id)).alive, true);
   assert.equal((await m.status.getBotStatus(t.id)).topRolePosition, 7);
   assert.equal((await m.status.getBotStatus(S)).alive, false); // the bot did not report the legacy guild
@@ -770,11 +777,17 @@ test("deleting a server removes all its data and nothing of the other servers", 
     events: [{ type: "join", session: "d1", name: "Doomed", identifiers: ["license:dead"], timestamp: Math.floor(Date.now() / 1000) }],
     console: [{ message: "hello" }]
   }));
+  const doomedPlayer = (await m.players.listPlayers(id)).rows[0].id;
+  await m.security.banPlayer(id, { discordId: A }, { playerId: doomedPlayer, reason: "x", source: "manual", expiresAt: null });
+  await m.security.recordDetection(id, { playerId: doomedPlayer, playerName: "Doomed", kind: "godmode", details: {}, action: "log" });
+  await m.security.storeScreenshot(id, { playerId: doomedPlayer, playerName: "Doomed", reason: "manual", bytes: new Uint8Array([1, 2]), mime: "image/jpeg", requestedBy: null });
+  await m.security.recordIncident(id, { kind: "ban", actorId: B, actorName: "b", actorBot: false, summary: "s", details: {}, actions: [], removedRoles: [] });
   const legacyBefore = (await m.sync.listStaffWithStats(S)).length;
 
   assert.equal(await m.servers.deleteServer(id), true);
   assert.equal(await m.servers.getServer(id), null);
-  for (const table of ["staff_members", "voice_sessions", "staff_notes", "discord_roles", "grade_roles", "server_owners", "audit_log", "players", "player_sessions", "fivem_state", "fivem_console"]) {
+  for (const table of ["staff_members", "voice_sessions", "staff_notes", "discord_roles", "grade_roles", "server_owners", "audit_log", "players", "player_sessions", "fivem_state", "fivem_console",
+    "security_settings", "bans", "ac_detections", "ac_screenshots", "security_incidents"]) {
     assert.equal((await db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM ${table} WHERE server_id = ?`, [id]))!.n, 0, table);
   }
   assert.equal((await db.get<{ n: number }>("SELECT COUNT(*) AS n FROM bot_status WHERE key LIKE ?", [`${id}:%`]))!.n, 0);
@@ -887,4 +900,156 @@ test("stale player sessions are closed at the agent's last sign of life", async 
   assert.equal(await m.agent.closeStalePlayerSessions(12 * 3600), 1);
   const zed = (await m.players.listPlayers("stale-srv")).rows[0];
   assert.deepEqual([zed.online, zed.playSeconds], [false, 1800]);
+});
+
+// ---- security: anticheat, bans, screenshots, anti-raid ----
+
+const SEC = "sec-srv";
+const ts = (d = new Date()) => Math.floor(d.getTime() / 1000);
+
+test("security settings: defaults, stored values merged with defaults, unknown keys dropped, rev bumped", async () => {
+  const fresh = await m.security.getSecuritySettings(SEC);
+  assert.equal(fresh.anticheat.enabled, true);
+  assert.equal(fresh.anticheat.detections.event_honeypot.action, "ban");
+  assert.equal(fresh.antiraid.enabled, false); // the bot never acts until an owner turns it on
+  assert.equal(fresh.antiraid.rules.role_delete.max, 0);
+
+  const edited = m.securityConfig.anticheatSchema.parse({ detections: { godmode: { action: "kick", screenshot: false }, not_a_detection: { action: "ban", screenshot: true } } });
+  await m.security.saveSecuritySettings(SEC, { discordId: A }, "anticheat", edited);
+  const after = await m.security.getSecuritySettings(SEC);
+  assert.deepEqual(after.anticheat.detections.godmode, { action: "kick", screenshot: false });
+  assert.equal(after.anticheat.detections.superjump.action, "kick"); // untouched: its default
+  assert.equal("not_a_detection" in after.anticheat.detections, false);
+  assert.ok(after.rev > fresh.rev);
+});
+
+test("agent security: settings and bans are sent only when the agent's rev is stale", async () => {
+  const first = await agentCall(SEC, { secRev: 0 });
+  assert.ok(first.security);
+  assert.equal(first.security.anticheat.detections.godmode.action, "kick");
+  const again = await agentCall(SEC, { secRev: first.security.rev });
+  assert.equal(again.security, undefined);
+  assert.equal(again.watch, false);
+});
+
+test("anticheat: a ban detection bans the player on identifiers and hardware tokens (never the IP); the agent gets it", async () => {
+  const t = ts();
+  await agentCall(SEC, { events: [{ type: "join", session: "c1", name: "Cheater", identifiers: ["license:cheat", "ip:9.9.9.9", "steam:1", `discord:${B}`], tokens: ["4:abc", "3:def"], timestamp: t }] });
+  // A later join without tokens keeps the known ones.
+  await agentCall(SEC, { events: [{ type: "leave", session: "c1", timestamp: t + 5 }, { type: "join", session: "c2", name: "Cheater", identifiers: ["license:cheat"], timestamp: t + 10 }] });
+  const { rev } = await m.security.getSecuritySettings(SEC);
+  const res = await agentCall(SEC, {
+    secRev: rev,
+    events: [{ type: "detection", session: "c2", name: "Cheater", kind: "event_honeypot", action: "ban", details: { event: "esx_truckerjob:pay" }, timestamp: t + 20 }]
+  });
+  assert.ok(res.security, "the new ban bumps the rev");
+  const ban = res.security.bans.find((b) => b.reason.includes("Événement piège"));
+  assert.ok(ban);
+  assert.deepEqual([...ban.ids].sort(), ["license:cheat"]); // identifiers as last seen (the second join)
+  assert.deepEqual(ban.tokens, ["4:abc", "3:def"]);
+  assert.equal(ban.expires, null);
+
+  const [detection] = await m.security.listDetections(SEC);
+  assert.deepEqual([detection.kind, detection.action, detection.playerName], ["event_honeypot", "ban", "Cheater"]);
+  assert.ok(detection.playerId);
+  const logs = await db.all<{ action: string; actor_discord_id: string }>("SELECT action, actor_discord_id FROM audit_log WHERE server_id = ?", [SEC]);
+  assert.ok(logs.some((l) => l.action === "player_ban" && l.actor_discord_id === "fiverax"));
+
+  assert.equal(await m.security.reviewDetection(SEC, { discordId: A }, detection.id, "dismissed"), true);
+  assert.equal(await m.security.reviewDetection("other", { discordId: A }, detection.id, "confirmed"), false); // other server
+});
+
+test("bans: temporary bans expire, revoked bans leave the agent's list, search and per-player lists", async () => {
+  const now = new Date();
+  const player = (await m.players.listPlayers(SEC)).rows.find((p) => p.name === "Cheater")!;
+  await m.security.banPlayer(SEC, { discordId: A }, { playerId: player.id, reason: "Freekill", source: "manual", expiresAt: new Date(now.getTime() + 3600_000).toISOString() }, now);
+  await m.security.banPlayer(SEC, { discordId: A }, { playerId: player.id, reason: "Ancien", source: "manual", expiresAt: new Date(now.getTime() - 1000).toISOString() }, now);
+  assert.equal(await m.security.banPlayer(SEC, { discordId: A }, { playerId: 999999, reason: "x", source: "manual", expiresAt: null }), false);
+
+  const active = await m.security.listBans(SEC, { active: true });
+  assert.deepEqual(active.map((b) => b.reason).sort(), ["Anticheat : Événement piège", "Freekill"]);
+  assert.equal((await m.security.listBans(SEC, { q: "Freekill" })).length, 1);
+  assert.equal((await m.security.listBans(SEC, { playerId: player.id })).length, 3);
+  assert.equal((await m.security.activeBansForAgent(SEC)).length, 2);
+
+  const freekill = active.find((b) => b.reason === "Freekill")!;
+  assert.equal(await m.security.revokeBan(SEC, { discordId: A }, freekill.id), true);
+  assert.equal(await m.security.revokeBan(SEC, { discordId: A }, freekill.id), false); // already revoked
+  assert.equal((await m.security.activeBansForAgent(SEC)).length, 1);
+  assert.equal(m.security.isBanActive({ revokedAt: null, expiresAt: null }), true);
+});
+
+test("screenshots: data URIs decoded, attached to their detection, AI verdict parsed, skipped without a key", async () => {
+  const png = `data:image/png;base64,${Buffer.from([137, 80, 78, 71]).toString("base64")}`;
+  const decoded = m.security.decodeImage(png);
+  assert.deepEqual([decoded?.mime, decoded?.bytes.length], ["image/png", 4]);
+  assert.equal(m.security.decodeImage("data:text/html;base64,PHA+"), null);
+  assert.equal(m.security.decodeImage("not a data uri"), null);
+
+  const player = (await m.players.listPlayers(SEC)).rows.find((p) => p.name === "Cheater")!;
+  const detectionId = await m.security.recordDetection(SEC, { playerId: player.id, playerName: "Cheater", kind: "godmode", details: {}, action: "log" });
+  const shotId = await m.security.storeScreenshot(SEC, { playerId: player.id, playerName: "Cheater", reason: "godmode", bytes: decoded!.bytes, mime: "image/png", requestedBy: null });
+  assert.equal((await m.security.listDetections(SEC, { kind: "godmode" })).find((d) => d.id === detectionId)?.screenshotId, shotId);
+  // The agent uploads the screenshot before it reports the detection: linked the other way round.
+  const early = await m.security.storeScreenshot(SEC, { playerId: player.id, playerName: "Cheater", reason: "superjump", bytes: decoded!.bytes, mime: "image/png", requestedBy: null });
+  const late = await m.security.recordDetection(SEC, { playerId: player.id, playerName: "Cheater", kind: "superjump", details: {}, action: "kick" });
+  assert.equal((await m.security.listDetections(SEC, { kind: "superjump" })).find((d) => d.id === late)?.screenshotId, early);
+  const image = await m.security.getScreenshotImage(SEC, shotId);
+  assert.deepEqual([...(image?.image ?? [])], [137, 80, 78, 71]);
+  assert.equal(await m.security.getScreenshotImage("other", shotId), null);
+
+  assert.deepEqual(m.vision.parseVerdict('```json\n{"verdict":"CHEAT","score":97.4,"summary":"Menu Eulen ouvert"}\n```'), { verdict: "cheat", score: 97, summary: "Menu Eulen ouvert" });
+  assert.equal(m.vision.parseVerdict('{"verdict":"maybe","score":5}'), null);
+  delete process.env.AI_API_KEY;
+  assert.equal((await m.vision.analyzeScreenshot(decoded!.bytes, "image/png")).verdict, "skipped");
+
+  await m.security.setScreenshotVerdict(SEC, shotId, { verdict: "cheat", score: 92, summary: "ESP" });
+  assert.equal((await m.security.listScreenshots(SEC, { verdict: "cheat" }))[0].id, shotId);
+  assert.equal((await m.security.securityOverview(SEC)).flaggedShots24h, 1);
+});
+
+test("security retention: screenshots after 30 days, detections and incidents after 180", async () => {
+  const old = new Date(Date.now() - 31 * 86400_000);
+  const shot = await m.security.storeScreenshot(SEC, { playerId: null, playerName: "Old", reason: "random", bytes: new Uint8Array([1]), mime: "image/jpeg", requestedBy: null }, old);
+  await m.security.pruneSecurityData();
+  assert.equal(await m.security.getScreenshotImage(SEC, shot), null);
+  assert.ok((await m.security.listScreenshots(SEC)).length > 0); // recent ones kept
+});
+
+test("anti-raid incidents: stored per guild, recreated roles keep the panel's grade / avert / access rules", async () => {
+  const api = await import("../src/lib/bot-api");
+  const guild = "560000000000000001";
+  const created = await m.servers.createServer({ name: "Raid RP", guildId: guild, createdBy: A });
+  assert.ok(created.ok);
+  const id = created.server.id;
+  const [oldRole, newRole] = ["660000000000000001", "660000000000000002"];
+  await db.batch([
+    m.db.stmt("INSERT INTO grade_roles (role_id, server_id) VALUES (?, ?)", [oldRole, id]),
+    m.db.stmt("INSERT INTO warn_roles (server_id, level, role_id) VALUES (?, 1, ?)", [id, oldRole]),
+    m.db.stmt("INSERT INTO panel_access (server_id, kind, discord_id, permissions) VALUES (?, 'role', ?, '[]')", [id, oldRole])
+  ]);
+
+  const incident = api.incidentSchema.parse({
+    guildId: guild, kind: "role_delete", actorId: B, actorName: "Raider", summary: "Suppression de rôle : 1 action(s)",
+    details: { remaps: [{ from: oldRole, to: newRole }] },
+    actions: [{ type: "Rôle recréé", ok: true, detail: "@Staff, redonné à 12/12 membre(s)" }, { type: "Auteur derank", ok: true }],
+    removedRoles: ["660000000000000003"]
+  });
+  const result = await api.applyIncident(incident);
+  assert.ok("id" in result);
+  const [stored] = await m.security.listIncidents(id);
+  assert.deepEqual([stored.kind, stored.actorId, stored.actions.length, stored.removedRoles], ["role_delete", B, 2, ["660000000000000003"]]);
+  assert.equal((await db.get<{ n: number }>("SELECT COUNT(*) AS n FROM grade_roles WHERE server_id = ? AND role_id = ?", [id, newRole]))!.n, 1);
+  assert.equal((await db.get<{ role_id: string }>("SELECT role_id FROM warn_roles WHERE server_id = ?", [id]))!.role_id, newRole);
+  assert.equal((await db.get<{ discord_id: string }>("SELECT discord_id FROM panel_access WHERE server_id = ? AND kind = 'role'", [id]))!.discord_id, newRole);
+
+  await m.security.markIncidentRestored(id, { discordId: A }, stored.id);
+  assert.ok((await m.security.getIncident(id, stored.id))?.restoredAt);
+  assert.deepEqual(await api.applyIncident({ ...incident, guildId: "569999999999999999" }), { ignored: "unknown_guild" });
+
+  // The bot gets each guild's anti-raid settings with the guild list and the heartbeat.
+  const { guilds } = await api.registeredGuilds();
+  assert.equal(guilds.find((g) => g.guildId === guild)?.antiraid.enabled, false);
+  const beat = await api.recordHeartbeat({ guilds: [{ guildId: guild }] });
+  assert.ok(guild in beat.antiraid);
 });

@@ -9,7 +9,7 @@ Trois dossiers indépendants :
 |---|---|---|
 | [`site/`](site) | Panel web (Next.js) + base libSQL (Turso en prod). Il possède **toutes les données**, rangées par serveur. | Vercel / un serveur Node |
 | [`bot/`](bot) | **Un seul** bot Discord pour tous les serveurs. Il surveille les serveurs Discord enregistrés sur le site et **envoie tout au site par API**. Aucune base de données. | N'importe où (VPS, conteneur…), il suffit qu'il joigne le site |
-| [`fivem/`](fivem) | Ressource `fiverax_agent` : relie chaque serveur FiveM au site (`/api/fivem/agent`) avec le **token propre à son serveur**. Joueurs en direct, kick, messages, annonces, ressources, console. | Chaque serveur FiveM |
+| [`fivem/`](fivem) | Ressource `fiverax_agent` : relie chaque serveur FiveM au site (`/api/fivem/agent`) avec le **token propre à son serveur**. Joueurs en direct, carte & vocal, kick, messages, annonces, ressources, console, **anticheat** et **bans**. | Chaque serveur FiveM |
 
 ## Comment ils se parlent
 ```
@@ -22,6 +22,14 @@ FiveM (1 par serveur) ──(HTTPS, Bearer <token du serveur>)──────
 - Le token d'un agent FiveM désigne son serveur : un agent ne peut jamais écrire dans un autre serveur.
 - L'agent FiveM **interroge** le site (toutes les 2 s quand quelqu'un regarde les pages « En direct », 8 s sinon) : il envoie connexions, déconnexions, console et résultats, et reçoit les actions en attente. Aucun port à ouvrir, compatible Vercel. Une action non récupérée en 2 min est abandonnée (jamais exécutée en retard). L'ancien endpoint `/api/fivem` (agent 1.x) marche toujours.
 - `server.cfg` : `set fiverax_url "https://…"`, `set fiverax_token "fvm_…"`, `add_ace resource.fiverax_agent command allow`, `ensure fiverax_agent` (les lignes exactes sont données dans Configuration). `set fiverax_console 0` refuse la console depuis le panel.
+- `add_ace group.admin fiverax.bypass allow` : le staff n'est jamais contrôlé par l'anticheat. `ensure screenshot-basic` (facultatif) : captures d'écran analysées par l'IA. Un script qui téléporte un joueur peut appeler `exports.fiverax_agent:allowTeleport(source, secondes)`.
+
+## Sécurité
+- **Anticheat** (agent FiveM, réglé dans Sécurité > Anticheat) : protection des événements (pièges + anti-spam), contrôle des événements du jeu (entités, explosions, armes données/retirées, éjections, particules, projectiles, dégâts), contrôle des joueurs toutes les 2 s (godmode, vie/armure, super saut, invisibilité, multiplicateurs de dégâts, armes et skins interdits, vitesse, téléportation), module client (heartbeat, ressources injectées, spectate, vision). Chaque détection : désactivée / signalée / kick / ban, avec capture d'écran en option.
+- **Captures IA** : `screenshot-basic` + le modèle de vision de `AI_BASE_URL` / `AI_API_KEY` (`AI_VISION_MODEL`, par défaut `meta-llama/llama-4-scout-17b-16e-instruct` sur Groq). Gardées 30 jours. Le ban automatique sur l'avis de l'IA seule est désactivé par défaut.
+- **Bans** : sur la license, les comptes liés et les identifiants matériels ; appliqués par l'agent à la connexion (liste gardée en cache sur le serveur FiveM si le panel est injoignable).
+- **Carte & vocal** : positions toutes les 2 s, qui parle, radio et appels (pma-voice). Fond de carte : `MAP_IMAGE_URL` (atlas GTA V 8192 px), sinon une grille avec les lieux principaux. Aucun audio n'est capté.
+- **Anti-raid Discord** (bot, Sécurité > Anti-raid, désactivé par défaut) : lit le journal d'audit en temps réel ; au-delà de ce qu'une règle tolère, annule tout (rôle recréé et redonné à ses membres, salon recréé, rôles remis, membres débannis, webhooks et bots supprimés…) et sanctionne l'auteur (derank / kick / ban ; rôles rendables depuis le panel). Raids de comptes : verrouillage temporaire. Le bot doit être **Administrateur**, avec son rôle **tout en haut**.
 
 ## Qui voit quoi
 - **N'importe qui** se connecte avec Discord et **ajoute son serveur** : seulement un serveur Discord où il est propriétaire, administrateur ou a « Gérer le serveur » (limite `MAX_SERVERS_PER_USER`, 5 par défaut). Il en devient propriétaire et la page Configuration le guide (bot, rôles, équipe, FiveM).

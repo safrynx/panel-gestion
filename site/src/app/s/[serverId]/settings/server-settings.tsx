@@ -77,7 +77,7 @@ export default function ServerSettings(props: Props) {
   }
 
   const cfg = token
-    ? `set fiverax_url "${props.appUrl}"\nset fiverax_token "${token}"\nadd_ace resource.fiverax_agent command allow\nensure fiverax_agent`
+    ? `set fiverax_url "${props.appUrl}"\nset fiverax_token "${token}"\nadd_ace resource.fiverax_agent command allow\nadd_ace group.admin fiverax.bypass allow\nensure screenshot-basic\nensure fiverax_agent`
     : "";
   const agentTag = !props.agent.linked
     ? { tone: "neutral", label: "Agent jamais connecté" }
@@ -144,7 +144,7 @@ export default function ServerSettings(props: Props) {
             <b>À copier maintenant : ce token ne sera plus jamais affiché.</b> Ajoute ces lignes au <code>server.cfg</code> du serveur FiveM :
             <pre style={{ whiteSpace: "pre-wrap", wordBreak: "break-all", margin: "10px 0" }}>{cfg}</pre>
             <CopyButton text={cfg} label="Copier" />
-            <p style={{ margin: "10px 0 0" }}>La ligne <code>add_ace</code> autorise l&apos;agent à gérer les ressources et à exécuter les commandes de la console. Pour refuser la console depuis le panel, ajoute <code>set fiverax_console 0</code>.</p>
+            <p style={{ margin: "10px 0 0" }}>La ligne <code>add_ace</code> autorise l&apos;agent à gérer les ressources et à exécuter les commandes de la console. Pour refuser la console depuis le panel, ajoute <code>set fiverax_console 0</code>. <code>fiverax.bypass</code> exempte ton staff de l&apos;anticheat ; <code>screenshot-basic</code> (facultatif) permet les captures analysées par l&apos;IA.</p>
           </div>
         )}
       </section>

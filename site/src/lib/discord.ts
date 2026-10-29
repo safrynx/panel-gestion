@@ -45,11 +45,11 @@ export function buildAuthorizeUrl(state: string): string {
   return `https://discord.com/oauth2/authorize?${params.toString()}`;
 }
 
-/** Link that adds the shared bot to a guild with "Manage Roles" (needed for grades and averts). */
+/** Link that adds the shared bot to a guild as Administrator (grades, averts, and the anti-raid which restores roles, channels, bans…). */
 export function botInviteUrl(guildId?: string | null): string | null {
   const clientId = process.env.DISCORD_CLIENT_ID;
   if (!clientId) return null;
-  const params = new URLSearchParams({ client_id: clientId, scope: "bot", permissions: "268435456" });
+  const params = new URLSearchParams({ client_id: clientId, scope: "bot", permissions: "8" });
   if (guildId) {
     params.set("guild_id", guildId);
     params.set("disable_guild_select", "true");
