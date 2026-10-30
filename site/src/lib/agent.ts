@@ -7,6 +7,7 @@ import { sendAnticheatAlert } from "./alerts";
 import { activeBansForAgent, banExpiry, banPlayer, countStrikes, getSecuritySettings, hasActiveBan, recordDetection, SYSTEM_ACTOR } from "./security";
 import { getServer } from "./servers";
 import { AC_ACTIONS, detectionLabel, type AnticheatSettings } from "./security-config";
+import { isFilePath, LIMITS, RESOURCE_RE } from "./studio-shared";
 
 /**
  * Two-way FiveM agent (resource `fiverax_agent`).
@@ -307,7 +308,15 @@ export const COMMANDS = {
   /** Stream the player's screen while the panel watches it. */
   screen: { permission: "screenshot", schema: z.object({ target }) },
   freeze: { permission: "player_kick", schema: z.object({ target, on: z.boolean() }) },
-  console: { permission: "console", schema: z.object({ command: text(500) }) }
+  console: { permission: "console", schema: z.object({ command: text(500) }) },
+  /** Write a Studio creation into its own resource folder, then (re)start it. Only queued by the studio API. */
+  deploy: {
+    permission: "studio_deploy",
+    schema: z.object({
+      resource: z.string().regex(RESOURCE_RE),
+      files: z.array(z.object({ path: z.string().refine(isFilePath), content: z.string().max(LIMITS.fileBytes) })).min(1).max(LIMITS.files)
+    })
+  }
 } satisfies Record<string, { permission: Permission; schema: z.ZodTypeAny }>;
 
 export type CommandKind = keyof typeof COMMANDS;
@@ -322,7 +331,8 @@ const AUDIT_ACTION: Record<CommandKind, string> = {
   screenshot: "player_screenshot",
   screen: "player_screen",
   freeze: "player_freeze",
-  console: "console_command"
+  console: "console_command",
+  deploy: "studio_deploy"
 };
 
 type Actor = { discordId: string; username?: string | null };
@@ -338,7 +348,10 @@ export async function enqueueCommand(
   payload: Record<string, unknown>,
   context: { playerName?: string | null; targetDiscordId?: string | null } = {}
 ): Promise<number> {
-  const details = kind === "refresh" ? { action: "refresh" } : { ...payload, player: context.playerName ?? undefined };
+  const details =
+    kind === "refresh" ? { action: "refresh" }
+    : kind === "deploy" ? { resource: payload.resource, files: Array.isArray(payload.files) ? payload.files.length : 0 }
+    : { ...payload, player: context.playerName ?? undefined };
   const [insert] = await db.batch([
     stmt("INSERT INTO fivem_commands (server_id, kind, payload, actor_discord_id, created_at) VALUES (?, ?, ?, ?, ?) RETURNING id", [
       serverId, kind, JSON.stringify(payload), actor.discordId, iso(new Date())

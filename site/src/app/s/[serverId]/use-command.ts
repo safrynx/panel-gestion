@@ -13,6 +13,32 @@ export function useCommand() {
   const paths = useServerPaths();
   const [busy, setBusy] = useState(false);
 
+  /** Follow a queued action until the agent answers. `useResult`: the toast shows the agent's own message. */
+  const follow = useCallback(
+    async (id: number, success: string, useResult = false): Promise<boolean> => {
+      for (let i = 0; i < 25; i++) {
+        await wait(i < 5 ? 800 : 1500);
+        const status = await fetch(paths.api(`command?id=${id}`)).then((r) => r.json()).catch(() => null);
+        if (!status) continue;
+        if (status.status === "done") {
+          toast(status.result && useResult ? status.result : success, "ok");
+          return true;
+        }
+        if (status.status === "failed") {
+          toast(`Refusé par le serveur : ${status.result ?? "erreur inconnue"}`, "error");
+          return false;
+        }
+        if (status.status === "expired" || status.status === "lost") {
+          toast("Le serveur FiveM n'a pas répondu : l'action n'a peut-être pas été exécutée.", "error");
+          return false;
+        }
+      }
+      toast("Action envoyée, toujours en attente du serveur FiveM.", "info");
+      return true;
+    },
+    [paths, toast]
+  );
+
   const send = useCallback(
     async (kind: string, payload: Record<string, unknown>, success: string): Promise<boolean> => {
       setBusy(true);
@@ -23,25 +49,7 @@ export function useCommand() {
           toast(describeApiError(data, res.status), "error");
           return false;
         }
-        for (let i = 0; i < 25; i++) {
-          await wait(i < 5 ? 800 : 1500);
-          const status = await fetch(paths.api(`command?id=${data.id}`)).then((r) => r.json()).catch(() => null);
-          if (!status) continue;
-          if (status.status === "done") {
-            toast(status.result && kind === "resource" ? status.result : success, "ok");
-            return true;
-          }
-          if (status.status === "failed") {
-            toast(`Refusé par le serveur : ${status.result ?? "erreur inconnue"}`, "error");
-            return false;
-          }
-          if (status.status === "expired" || status.status === "lost") {
-            toast("Le serveur FiveM n'a pas répondu : l'action n'a peut-être pas été exécutée.", "error");
-            return false;
-          }
-        }
-        toast("Action envoyée, toujours en attente du serveur FiveM.", "info");
-        return true;
+        return await follow(data.id, success, kind === "resource");
       } catch {
         toast("Impossible de joindre le panel.", "error");
         return false;
@@ -49,10 +57,10 @@ export function useCommand() {
         setBusy(false);
       }
     },
-    [paths, toast]
+    [paths, toast, follow]
   );
 
-  return { send, busy };
+  return { send, follow, busy };
 }
 
 /** Poll a JSON endpoint while the page is visible (an empty url never polls). */

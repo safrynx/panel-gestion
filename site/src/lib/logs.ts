@@ -11,7 +11,8 @@ export const LOG_GROUPS: Record<string, { label: string; actions: string[] }> = 
   sync: { label: "Synchro, IA & reset", actions: ["staff_sync", "review_generate", "counters_reset"] },
   fivem: { label: "Serveur FiveM", actions: ["player_kick", "player_message", "announce", "resource", "console_command", "player_screenshot"] },
   security: { label: "Sécurité", actions: ["player_ban", "player_unban", "anticheat_config", "antiraid_config", "antiraid_restore", "player_screen", "player_freeze", "discord_lockdown", "discord_unlock", "discord_backup", "discord_restore"] },
-  server: { label: "Serveur", actions: ["server_create", "server_update", "owner_add", "owner_remove", "fivem_token_rotate"] }
+  studio: { label: "Studio IA", actions: ["studio_create", "studio_delete", "studio_deploy"] },
+  server: { label: "Serveur", actions: ["server_create","server_update", "owner_add", "owner_remove", "fivem_token_rotate"] }
 };
 
 const ACTION_LABELS: Record<string, { label: string; tone: LogTone }> = {
@@ -55,8 +56,13 @@ const ACTION_LABELS: Record<string, { label: string; tone: LogTone }> = {
   discord_lockdown: { label: "Discord verrouillé", tone: "danger" },
   discord_unlock: { label: "Discord déverrouillé", tone: "up" },
   discord_backup: { label: "Sauvegarde Discord", tone: "info" },
-  discord_restore: { label: "Restauration Discord", tone: "danger" }
+  discord_restore: { label: "Restauration Discord", tone: "danger" },
+  studio_create: { label: "Studio : création", tone: "info" },
+  studio_delete: { label: "Studio : suppression", tone: "danger" },
+  studio_deploy: { label: "Studio : déploiement", tone: "warn" }
 };
+
+const STUDIO_KINDS: Record<string, string> = { ui: "UI", script: "Script", map: "Mapping" };
 
 const RESOURCE_VERBS: Record<string, string> = { start: "Démarrage", stop: "Arrêt", restart: "Redémarrage", refresh: "Rechargement de la liste des ressources" };
 
@@ -139,6 +145,11 @@ function describe(action: string, d: Record<string, unknown>): string {
       return `Sauvegarde #${d.backupId ?? "?"}`;
     case "antiraid_restore":
       return `${d.roles ?? 0} rôle(s) rendu(s) après une sanction de l'anti-raid`;
+    case "studio_create":
+    case "studio_delete":
+      return `${d.kind ? `${STUDIO_KINDS[String(d.kind)] ?? d.kind} ` : ""}« ${d.name ?? "?"} » (${d.resource ?? "?"})`;
+    case "studio_deploy":
+      return `${d.resource ?? "?"} · ${d.files ?? 0} fichier(s) envoyé(s) au serveur`;
     case "staff_sync":
       return `${d.total ?? 0} membres · +${d.inserted ?? 0} / ~${d.updated ?? 0} / −${d.markedLeft ?? 0}`;
     default:

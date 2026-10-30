@@ -23,7 +23,9 @@ export const PERMISSIONS = [
   { key: "view_security", label: "Voir l'anticheat, les bans et l'anti-raid", group: "Sécurité" },
   { key: "ban", label: "Bannir / débannir des joueurs", group: "Sécurité" },
   { key: "screenshot", label: "Capturer l'écran d'un joueur", group: "Sécurité" },
-  { key: "security_config", label: "Régler l'anticheat et l'anti-raid", group: "Sécurité" }
+  { key: "security_config", label: "Régler l'anticheat et l'anti-raid", group: "Sécurité" },
+  { key: "studio", label: "Créer des UI, scripts et mappings avec l'IA", group: "Studio IA" },
+  { key: "studio_deploy", label: "Déployer les créations sur le serveur FiveM", group: "Studio IA" }
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number]["key"];

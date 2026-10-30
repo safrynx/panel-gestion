@@ -149,6 +149,20 @@ export function describeApiError(data: { error?: string; discordStatus?: number;
     case "nothing_to_restore": return "Rien à rendre : les rôles ont déjà été rendus.";
     case "unknown_screenshot": return "Capture introuvable (supprimée après 30 jours).";
     case "validation": return "Valeurs invalides : vérifie le formulaire.";
-    default: return `Erreur : ${data.error ?? status}`;
+    case "resource_taken": return "Une création porte déjà ce nom de ressource sur ce serveur : choisis-en un autre.";
+    case "invalid_resource": return "Nom de ressource invalide (minuscules, chiffres, _ et -, 3 à 48 caractères).";
+    case "unknown_creation": return "Création introuvable (supprimée ?).";
+    case "unknown_version": return "Version introuvable.";
+    case "nothing_to_deploy": return "Rien à déployer : la création n'a encore aucun fichier.";
+    case "too_many_files": return "Trop de fichiers (25 au maximum).";
+    case "file_too_large":
+    case "files_too_large": return "Fichiers trop lourds (200 Ko par fichier, 400 Ko au total).";
+    case "ai_not_configured": return "IA non configurée : ajoute AI_API_KEY dans l'environnement du site.";
+    case "ai_unreadable": return "L'IA a répondu dans un format illisible : relance ou reformule.";
+    case "ai_truncated": return "La réponse de l'IA a été coupée (trop longue) : demande une modification plus petite, ou augmente AI_CODE_MAX_TOKENS.";
+    case "ai_rate_limited": return "Limite du service IA atteinte : réessaie dans une minute.";
+    default:
+      if (data.error?.startsWith("ai_http_")) return `Le service IA a refusé la demande (code ${data.error.slice(8)}).`;
+      return `Erreur : ${data.error ?? status}`;
   }
 }

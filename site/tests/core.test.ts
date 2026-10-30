@@ -41,6 +41,9 @@ type Mods = {
   securityConfig: typeof import("../src/lib/security-config");
   vision: typeof import("../src/lib/vision");
   live: typeof import("../src/lib/security-live");
+  studio: typeof import("../src/lib/studio");
+  shared: typeof import("../src/lib/studio-shared");
+  zip: typeof import("../src/lib/zip");
 };
 let m: Mods;
 let db: Mods["db"]["db"];
@@ -70,7 +73,10 @@ before(async () => {
     security: await import("../src/lib/security"),
     securityConfig: await import("../src/lib/security-config"),
     vision: await import("../src/lib/vision"),
-    live: await import("../src/lib/security-live")
+    live: await import("../src/lib/security-live"),
+    studio: await import("../src/lib/studio"),
+    shared: await import("../src/lib/studio-shared"),
+    zip: await import("../src/lib/zip")
   };
   db = m.db.db;
 });
@@ -460,7 +466,7 @@ test("database: batches are atomic, migrations are idempotent and safe to run co
   const before = (await client.execute("SELECT COUNT(*) AS n FROM schema_migrations")).rows[0].n;
   await Promise.all([runMigrations(client), runMigrations(client)]);
   assert.equal((await client.execute("SELECT COUNT(*) AS n FROM schema_migrations")).rows[0].n, before);
-  assert.equal(Number(before), 17);
+  assert.equal(Number(before), 18);
 });
 
 test("bot API: sync snapshot, member event, voice events, heartbeat, playtime, shutdown", async () => {
@@ -1164,4 +1170,144 @@ test("backups: stored per server, the 15 latest kept, read back for a restore", 
   assert.deepEqual(await m.live.getBackupData(SEC2, last), data);
   assert.equal(await m.live.getBackupData("other", last), null);
   assert.ok(await m.live.lastBackupAt(SEC2));
+});
+
+// ---- Studio IA ----
+
+test("zip: CRC-32 and a valid stored archive with UTF-8 names", () => {
+  assert.equal(m.zip.crc32(new TextEncoder().encode("123456789")), 0xcbf43926);
+  const out = m.zip.zip([{ path: "res/fxmanifest.lua", content: "fx_version 'cerulean'" }, { path: "res/html/é.html", content: "<html></html>" }]);
+  const view = new DataView(out.buffer);
+  assert.equal(view.getUint32(0, true), 0x04034b50);
+  const end = out.length - 22;
+  assert.equal(view.getUint32(end, true), 0x06054b50);
+  assert.equal(view.getUint16(end + 10, true), 2);
+  assert.equal(view.getUint32(view.getUint32(end + 16, true), true), 0x02014b50);
+});
+
+test("studio checks: Lua blocks counted outside strings and comments, missing files and risky calls flagged", () => {
+  const ok = [
+    "-- if this were code it would end",
+    'local s = "function if do"',
+    "--[[ do",
+    "end end ]]",
+    'local t = { ["end"] = 1 }',
+    "for i = 1, 3 do",
+    "  if i == 2 then print([[ function ]]) elseif i == 3 then print(t.end) end",
+    "end",
+    "local f = function() return 1 end"
+  ].join("\n");
+  assert.deepEqual(m.shared.luaBalance(ok), { opens: 3, ends: 3 });
+  assert.deepEqual(m.shared.luaBalance("if a then\n  b()\n"), { opens: 1, ends: 0 });
+
+  const checks = m.shared.checkFiles([
+    { path: "fxmanifest.lua", content: "fx_version 'cerulean'\ngame 'gta5'\nclient_script 'client.lua'\nserver_script 'server.lua'\nshared_script '@ox_lib/init.lua'" },
+    { path: "client.lua", content: "CreateThread(function()\n  Wait(0)\n" },
+    { path: "server.lua", content: "RegisterNetEvent('x:pay', function(n)\n  local p = ESX.GetPlayerFromId(source)\n  p.addMoney(n)\nend)\nos.execute('rm -rf /')" }
+  ]);
+  assert.ok(checks.some((c) => c.file === "client.lua" && c.level === "error" && /end/.test(c.message)));
+  assert.ok(checks.some((c) => c.file === "server.lua" && c.level === "error" && /système/.test(c.message)));
+  assert.ok(checks.some((c) => c.file === "server.lua" && c.level === "warn" && /cheater/.test(c.message)));
+  assert.ok(!checks.some((c) => /ox_lib/.test(c.message)), "@ dependencies are not local files");
+  assert.ok(m.shared.checkFiles([{ path: "fxmanifest.lua", content: "fx_version 'cerulean'\nclient_script 'missing.lua'" }]).some((c) => /missing\.lua/.test(c.message)));
+  assert.ok(m.shared.checkFiles([]).some((c) => /fxmanifest/.test(c.message)));
+});
+
+test("studio files: safe paths only, limits enforced, slugs, stable hash", () => {
+  const cleaned = m.shared.cleanFiles([
+    { path: "./client.lua", content: "a\r\nb" },
+    { path: "../evil.lua", content: "x" },
+    { path: "/etc/passwd.txt", content: "x" },
+    { path: "html\\index.html", content: "<html></html>" },
+    { path: "fxmanifest.lua", content: "fx" },
+    { path: "run.exe", content: "x" }
+  ]);
+  assert.deepEqual(cleaned.map((f) => f.path), ["fxmanifest.lua", "client.lua", "html/index.html"]);
+  assert.equal(cleaned[1].content, "a\nb");
+  assert.throws(() => m.shared.cleanFiles([{ path: "big.lua", content: "x".repeat(m.shared.LIMITS.fileBytes + 1) }]), /file_too_large/);
+  assert.equal(m.shared.resourceSlug("Menu Garage (été) !"), "fvx_menu_garage_ete");
+  assert.equal(m.shared.resourceSlug("!!!"), "fvx_creation");
+  assert.equal(m.shared.filesHash(cleaned), m.shared.filesHash([...cleaned]));
+  assert.notEqual(m.shared.filesHash(cleaned), m.shared.filesHash([{ ...cleaned[0], content: "fy" }, ...cleaned.slice(1)]));
+});
+
+test("studio AI reply: JSON in fences, files as object or list, null deletes, tests and objects kept", () => {
+  const reply = m.studio.parseAIReply('Voici :\n```json\n{"summary":"HUD ajouté","files":{"client.lua":"print(1)","old.lua":null},"tests":[{"label":"Ouvrir","data":{"action":"open"}}]}\n```');
+  assert.equal(reply!.summary, "HUD ajouté");
+  assert.deepEqual(reply!.tests, [{ label: "Ouvrir", data: { action: "open" } }]);
+  const next = m.studio.applyFiles([{ path: "old.lua", content: "x" }, { path: "client.lua", content: "y" }, { path: "keep.lua", content: "k" }], reply!.files!);
+  assert.deepEqual(next.map((f) => [f.path, f.content]), [["client.lua", "print(1)"], ["keep.lua", "k"]]);
+  assert.equal(m.studio.parseAIReply('{"files":[{"path":"a.lua","content":"1"}]}')!.files!.get("a.lua"), "1");
+  assert.equal(m.studio.parseAIReply('{"summary":"rien"}'), null);
+  assert.equal(m.studio.parseAIReply("pas de json"), null);
+  assert.equal(m.studio.parseAIReply('{"objects":[{"model":"prop_bin_01a"}]}')!.objects!.length, 1);
+});
+
+test("mapping: invalid objects dropped, offsets become game coordinates in valid Lua", () => {
+  const map = m.shared.cleanMap({
+    center: [100, -200, 30],
+    distance: 5,
+    objects: [
+      { id: "a", model: "prop_roadcone02a", x: 2, y: -3, z: 0.5, heading: 450 },
+      { model: "bad model'); os.execute('x", x: 0, y: 0 },
+      { model: "prop_bin_01a", x: 9999, y: 1, ground: false }
+    ]
+  });
+  assert.equal(map.distance, 20);
+  assert.equal(map.objects.length, 2);
+  assert.equal(map.objects[0].heading, 90);
+  assert.equal(map.objects[1].x, 500);
+  const files = m.shared.mapFiles("Barrage", map);
+  const client = files.find((f) => f.path === "client.lua")!.content;
+  assert.match(client, /model = 'prop_roadcone02a', pos = vector3\(102\.000, -203\.000, 30\.500\), heading = 90\.00, ground = true/);
+  assert.match(client, /ground = false/);
+  const balance = m.shared.luaBalance(client);
+  assert.equal(balance.opens, balance.ends);
+  assert.deepEqual(m.shared.checkFiles(files).filter((c) => c.level === "error"), []);
+});
+
+test("studio creations: versions, restore, unique resource, deploy queued for the agent without files in the logs", async () => {
+  const SV = "studio-srv";
+  const actor = { discordId: A, username: "a" };
+  const id = await m.studio.createCreation(SV, actor, { kind: "script", name: "Réparation", framework: "esx" });
+  await assert.rejects(m.studio.createCreation(SV, actor, { kind: "ui", name: "Réparation", framework: "standalone" }), /resource_taken/);
+  await assert.rejects(m.studio.createCreation(SV, actor, { kind: "ui", name: "x", resource: "Bad Name", framework: "standalone" }), /invalid_resource/);
+
+  const manifest = { path: "fxmanifest.lua", content: "fx_version 'cerulean'\ngame 'gta5'\nclient_script 'client.lua'" };
+  await m.studio.saveCreation(SV, actor, id, { files: [manifest, { path: "client.lua", content: "print('v1')" }] }, { source: "manual", summary: "v1" });
+  const saved = await m.studio.saveCreation(SV, actor, id, { files: [manifest, { path: "client.lua", content: "print('v2')" }] }, { source: "ai", prompt: "change", summary: "v2" });
+  assert.equal(saved.files[1].content, "print('v2')");
+  assert.deepEqual(saved.versions.map((v) => v.source), ["ai", "manual", "create"]);
+  assert.equal(saved.versions[0].prompt, "change");
+
+  const restored = await m.studio.restoreVersion(SV, actor, id, saved.versions[1].id);
+  assert.equal(restored.files[1].content, "print('v1')");
+  assert.equal(restored.versions.length, 4);
+  assert.equal((await m.studio.listCreations(SV, "script"))[0].fileCount, 2);
+  assert.deepEqual(await m.studio.listCreations(SV, "ui"), []);
+
+  delete process.env.AI_API_KEY;
+  await assert.rejects(m.studio.generateCreation(SV, actor, id, "ajoute une commande"), /ai_not_configured/);
+
+  // Deploy: the agent receives the files; the log only says how many.
+  const cmd = await m.agent.enqueueCommand(SV, actor, "deploy", { resource: restored.resource, files: restored.files });
+  await m.studio.markDeploy(SV, id, cmd, restored.files);
+  const call = await agentCall(SV, { version: "3.2.0" });
+  const sent = call.commands.find((c) => c.id === cmd)!;
+  assert.equal(sent.kind, "deploy");
+  assert.deepEqual((sent.payload.files as { path: string }[]).map((f) => f.path), ["fxmanifest.lua", "client.lua"]);
+  const log = await db.get<{ details: string }>("SELECT details FROM audit_log WHERE server_id = ? AND action = 'studio_deploy'", [SV]);
+  assert.deepEqual(JSON.parse(log!.details), { resource: "fvx_reparation", files: 2 });
+  await agentCall(SV, { version: "3.2.0", results: [{ id: cmd, ok: true, message: "fvx_reparation déployée" }] });
+  let current = (await m.studio.getCreation(SV, id))!;
+  assert.deepEqual([current.deploy.status, current.deploy.current], ["done", true]);
+  current = await m.studio.saveCreation(SV, actor, id, { files: [manifest, { path: "client.lua", content: "print('v3')" }] }, { source: "manual" });
+  assert.deepEqual([current.deploy.status, current.deploy.current], ["done", false]);
+
+  // The agent's schema refuses paths that leave the resource.
+  assert.equal(m.agent.COMMANDS.deploy.schema.safeParse({ resource: "fvx_x", files: [{ path: "../server.cfg", content: "" }] }).success, false);
+
+  assert.equal(await m.studio.deleteCreation(SV, actor, id), true);
+  assert.equal(await m.studio.getCreation(SV, id), null);
+  assert.equal((await db.get<{ n: number }>("SELECT COUNT(*) AS n FROM studio_versions WHERE creation_id = ?", [id]))!.n, 0);
 });

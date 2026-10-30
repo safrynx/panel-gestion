@@ -9,7 +9,7 @@ Trois dossiers indépendants :
 |---|---|---|
 | [`site/`](site) | Panel web (Next.js) + base libSQL (Turso en prod). Il possède **toutes les données**, rangées par serveur. | Vercel / un serveur Node |
 | [`bot/`](bot) | **Un seul** bot Discord pour tous les serveurs. Il surveille les serveurs Discord enregistrés sur le site et **envoie tout au site par API**. Aucune base de données. | N'importe où (VPS, conteneur…), il suffit qu'il joigne le site |
-| [`fivem/`](fivem) | Ressource `fiverax_agent` : relie chaque serveur FiveM au site (`/api/fivem/agent`) avec le **token propre à son serveur**. Joueurs en direct, carte & vocal, kick, messages, annonces, ressources, console, **anticheat** et **bans**. | Chaque serveur FiveM |
+| [`fivem/`](fivem) | Ressource `fiverax_agent` : relie chaque serveur FiveM au site (`/api/fivem/agent`) avec le **token propre à son serveur**. Joueurs en direct, carte & vocal, kick, messages, annonces, ressources, console, **anticheat**, **bans** et déploiement du **Studio IA**. | Chaque serveur FiveM |
 
 ## Comment ils se parlent
 ```
@@ -21,7 +21,7 @@ FiveM (1 par serveur) ──(HTTPS, Bearer <token du serveur>)──────
 - `tick` (10 min) : nettoyage des sessions FiveM, puis bilan IA du dimanche **de chaque serveur, dans son propre fuseau horaire**.
 - Le token d'un agent FiveM désigne son serveur : un agent ne peut jamais écrire dans un autre serveur.
 - L'agent FiveM **interroge** le site (toutes les 2 s quand quelqu'un regarde les pages « En direct », 8 s sinon) : il envoie connexions, déconnexions, console et résultats, et reçoit les actions en attente. Aucun port à ouvrir, compatible Vercel. Une action non récupérée en 2 min est abandonnée (jamais exécutée en retard). L'ancien endpoint `/api/fivem` (agent 1.x) marche toujours.
-- `server.cfg` : `set fiverax_url "https://…"`, `set fiverax_token "fvm_…"`, `add_ace resource.fiverax_agent command allow`, `ensure fiverax_agent` (les lignes exactes sont données dans Configuration). `set fiverax_console 0` refuse la console depuis le panel.
+- `server.cfg` : `set fiverax_url "https://…"`, `set fiverax_token "fvm_…"`, `add_ace resource.fiverax_agent command allow`, `ensure fiverax_agent` (les lignes exactes sont données dans Configuration). `set fiverax_console 0` refuse la console depuis le panel, `set fiverax_deploy 0` les déploiements du Studio IA.
 - `add_ace group.admin fiverax.bypass allow` : le staff n'est jamais contrôlé par l'anticheat. `ensure screenshot-basic` (facultatif) : captures d'écran analysées par l'IA. Un script qui téléporte un joueur peut appeler `exports.fiverax_agent:allowTeleport(source, secondes)`.
 
 ## Sécurité
@@ -33,6 +33,15 @@ FiveM (1 par serveur) ──(HTTPS, Bearer <token du serveur>)──────
 - **Écran en direct** : le staff voit l'écran d'un joueur (≈ 1 image/s via `screenshot-basic`) depuis En direct, la carte ou sa fiche ; le flux s'arrête 15 s après la fermeture, rien n'est stocké. **Geler** un joueur le bloque sur place.
 - **Anticheat, en plus** : durée des bans de l'anticheat, cumul de détections (kick puis ban au seuil), alertes vers un webhook Discord, règles de connexion (serveur verrouillé avec liste blanche, Discord/Steam obligatoire, pseudos interdits), journal des connexions refusées, ressource arrêtée chez un seul joueur, détections affichées sur la carte, **comptes liés** (même PC ou même Discord/Steam) sur la fiche joueur.
 - **Anti-raid, en plus** : sanctions quarantaine (rôle dédié) et mute, rôles et salons protégés (toute modification annulée dès la première), permissions de salons modifiées en masse, protection des messages (flood, mentions de masse, @everyone, invitations et liens — ces deux derniers demandent `BOT_MESSAGE_CONTENT=1` et l'intent « Message Content »), alerte en MP au propriétaire, **verrouillage manuel** depuis le panel (vérification max, arrivants expulsés, salons en lecture seule), **sauvegardes** des rôles/salons/rôles des membres (auto toutes les N h + manuelle) et **restauration** après un nuke. Le bot récupère les commandes du panel toutes les 15 s.
+
+## Studio IA
+Trois créateurs (menu « Studio IA », permissions « Studio » et « Déployer ») : on décrit ce qu'on veut en français, l'IA écrit la ressource, on la retouche en discutant avec elle ou à la main, puis on la télécharge en `.zip` ou on la **déploie** sur le serveur en un clic.
+- **UI Creator** : page NUI (HTML/CSS/JS) + `client.lua`. **Aperçu en direct** en 1920×1080 sur un fond de jeu, dans un cadre isolé : boutons « messages du jeu » (comme `SendNUIMessage`), journal des callbacks NUI et des erreurs JavaScript.
+- **Script Creator** : `fxmanifest`, `config`, client, serveur, README pour Standalone / ESX / QBCore / Qbox. Le serveur ne fait jamais confiance au client (consigne donnée à l'IA).
+- **Mapping Creator** : éditeur vue de dessus (glisser, tourner, dupliquer, catalogue de props), centre posé sur un lieu ou **la position d'un joueur en jeu** ; l'IA compose ou modifie la scène. Le panel écrit lui-même le `client.lua` (objets figés qui apparaissent quand un joueur approche).
+- **Vérifications** à chaque modification : fichiers déclarés absents, blocs Lua non fermés, appels dangereux (`os.execute`…), événements réseau qui donnent de l'argent ou des objets sans contrôle ; bouton « Corriger avec l'IA ».
+- **Versions** : chaque demande à l'IA, modification ou restauration est gardée (40 dernières) et restaurable.
+- **Déploiement** : l'agent (3.2) écrit la ressource dans `resources/[fiverax_studio]/<nom>` (à côté de son propre dossier), fait `refresh` puis la (re)démarre. Il ne touche jamais une ressource du même nom hors de ce dossier. `set fiverax_deploy 0` le refuse. Modèle IA : `AI_CODE_MODEL` (sinon `AI_MODEL`), longueur de réponse `AI_CODE_MAX_TOKENS` (8000).
 
 ## Qui voit quoi
 - **N'importe qui** se connecte avec Discord et **ajoute son serveur** : seulement un serveur Discord où il est propriétaire, administrateur ou a « Gérer le serveur » (limite `MAX_SERVERS_PER_USER`, 5 par défaut). Il en devient propriétaire et la page Configuration le guide (bot, rôles, équipe, FiveM).

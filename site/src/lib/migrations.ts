@@ -546,6 +546,43 @@ const migrations: { name: string; sql: string }[] = [
       );
       CREATE INDEX IF NOT EXISTS idx_discord_backups ON discord_backups(server_id, id)
     `
+  },
+  {
+    name: "018_studio",
+    sql: `
+      CREATE TABLE IF NOT EXISTS studio_creations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        server_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        name TEXT NOT NULL,
+        resource TEXT NOT NULL,
+        framework TEXT NOT NULL DEFAULT 'standalone',
+        files_json TEXT NOT NULL DEFAULT '[]',
+        data_json TEXT NOT NULL DEFAULT '{}',
+        author_discord_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        deploy_command_id INTEGER,
+        deploy_hash TEXT,
+        deployed_at TEXT,
+        UNIQUE (server_id, resource)
+      );
+      CREATE INDEX IF NOT EXISTS idx_studio_creations ON studio_creations(server_id, kind, updated_at);
+      CREATE TABLE IF NOT EXISTS studio_versions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        creation_id INTEGER NOT NULL,
+        server_id TEXT NOT NULL,
+        source TEXT NOT NULL,
+        prompt TEXT,
+        summary TEXT,
+        files_json TEXT NOT NULL,
+        data_json TEXT NOT NULL,
+        author_discord_id TEXT NOT NULL,
+        author_name TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_studio_versions ON studio_versions(creation_id, id)
+    `
   }
 ];
 

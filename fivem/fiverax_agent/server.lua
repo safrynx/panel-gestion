@@ -12,10 +12,11 @@
 --   add_ace resource.fiverax_agent command allow      # needed for console commands and resources
 --   add_ace group.admin fiverax.bypass allow          # staff never flagged by the anticheat
 --   set fiverax_console 0                             # optional: refuse console commands from the panel
+--   set fiverax_deploy 0                              # optional: refuse Studio deployments from the panel
 --   ensure screenshot-basic                           # optional: screenshots analysed by the AI
 --   ensure fiverax_agent
 
-local VERSION = '3.1.0'
+local VERSION = '3.2.0'
 local RESOURCE = GetCurrentResourceName()
 
 -- The 1.x convars (gtasun_staff_api_url pointed at /api/fivem) still work.
@@ -29,6 +30,7 @@ local URL = baseUrl()
 local TOKEN = GetConvar('fiverax_token', '')
 if TOKEN == '' then TOKEN = GetConvar('gtasun_staff_api_token', '') end
 local ALLOW_CONSOLE = GetConvarInt('fiverax_console', 1) == 1
+local ALLOW_DEPLOY = GetConvarInt('fiverax_deploy', 1) == 1
 local HEADERS = { ['Content-Type'] = 'application/json', ['Authorization'] = 'Bearer ' .. TOKEN }
 
 local STATE_EVERY = 15   -- seconds between two snapshots when nothing changed (and nobody watches)
@@ -315,6 +317,86 @@ end
 
 AddEventHandler('playerDropped', function() streaming[source] = nil end)
 
+-- ---- Studio: creations written to <resources>/[fiverax_studio]/<name> ----
+
+local STUDIO_MARK = '.fiverax.json'   -- files of the last deployment: also marks the folder as the Studio's
+
+local function studioRoot()
+    local own = (GetResourcePath(RESOURCE) or ''):gsub('\\', '/')
+    local parent = own:match('^(.*)/[^/]+$')
+    return parent and (parent .. '/[fiverax_studio]') or nil
+end
+
+-- Paths only ever hold [%w_.-/] (checked before), so quoting them is enough.
+local function makeDir(path)
+    if package.config:sub(1, 1) == '\\' then
+        local win = (path:gsub('/', '\\'))
+        os.execute(('if not exist "%s" mkdir "%s"'):format(win, win))
+    else
+        os.execute(("mkdir -p '%s'"):format(path))
+    end
+end
+
+local function readJson(path)
+    local file = io.open(path, 'rb')
+    if not file then return nil end
+    local content = file:read('a')
+    file:close()
+    local ok, data = pcall(json.decode, content or '')
+    return ok and data or nil
+end
+
+local function deploy(p)
+    if not ALLOW_DEPLOY then return false, 'Déploiement désactivé sur ce serveur (fiverax_deploy 0)' end
+    if not io or not os or not os.execute then return false, "Ce serveur n'autorise pas l'écriture de fichiers : télécharge le .zip depuis le panel" end
+    local name = tostring(p.resource or '')
+    if #name > 48 or name == RESOURCE or not name:match('^[a-z0-9][a-z0-9_%-]+$') then return false, 'Nom de ressource invalide' end
+    local root = studioRoot()
+    if not root then return false, 'Dossier des ressources introuvable' end
+    local dir = root .. '/' .. name
+    if GetResourceState(name) ~= 'missing' then
+        local existing = (GetResourcePath(name) or ''):gsub('\\', '/')
+        if existing:sub(1, #root) ~= root then
+            return false, ('Une ressource « %s » existe déjà hors du Studio : change son nom dans le panel'):format(name)
+        end
+    end
+
+    local files, wanted = p.files or {}, {}
+    for _, f in ipairs(files) do
+        local path = tostring(f.path or '')
+        if path:find('..', 1, true) or not path:match('^[%w_%-][%w_%.%-/]*$') then return false, 'Chemin refusé : ' .. path end
+        wanted[path] = true
+    end
+    makeDir(dir)
+    for _, f in ipairs(files) do
+        makeDir((dir .. '/' .. f.path):match('^(.*)/[^/]+$'))
+        local file, err = io.open(dir .. '/' .. f.path, 'wb')
+        if not file then return false, ('Écriture impossible (%s) : %s'):format(f.path, tostring(err)) end
+        file:write(f.content or '')
+        file:close()
+    end
+    -- Files of the previous deployment that are gone from the creation.
+    for _, old in ipairs(readJson(dir .. '/' .. STUDIO_MARK) or {}) do
+        if type(old) == 'string' and not wanted[old] and not old:find('..', 1, true) then os.remove(dir .. '/' .. old) end
+    end
+    local list = {}
+    for path in pairs(wanted) do list[#list + 1] = path end
+    local mark = io.open(dir .. '/' .. STUDIO_MARK, 'wb')
+    if mark then
+        mark:write(json.encode(list))
+        mark:close()
+    end
+
+    ExecuteCommand('refresh')
+    local state = GetResourceState(name)
+    if state == 'missing' then return false, 'Fichiers écrits mais FiveM ne voit pas la ressource (dossier : ' .. dir .. ')' end
+    if state == 'started' or state == 'starting' then StopResource(name) end
+    local ok = StartResource(name)
+    dirty = true
+    if not ok then return false, name .. ' : fichiers écrits mais le démarrage a échoué (erreur dans la console du serveur)' end
+    return true, ('%s déployée et démarrée (%d fichiers)'):format(name, #files)
+end
+
 -- ---- actions from the panel: each returns ok, message ----
 
 local function online(target)
@@ -375,7 +457,8 @@ local handlers = {
         if not ALLOW_CONSOLE then return false, 'Console désactivée sur ce serveur (fiverax_console 0)' end
         ExecuteCommand(p.command)
         return true, 'Commande exécutée'
-    end
+    end,
+    deploy = deploy
 }
 
 local function run(command)
